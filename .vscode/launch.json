@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Train Diffusion",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/training_pipeline.py",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    }
+  ]
+}

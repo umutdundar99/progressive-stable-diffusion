@@ -1,0 +1,84 @@
+defaults:
+  - _self_
+
+model:
+  name: "ordinal_progressive_sd"
+  embedding_dim: 768          
+  conditioning_dim: 768
+  base_channels: 320         
+  num_res_blocks: [2, 2, 2, 2]
+  attention_heads: 8
+  dropout: 0.1
+  latent_channels: 4         
+  use_pretrained_vae: true
+  pretrained_vae_path: "CompVis/stable-diffusion-v1-4"
+  pretrained_unet_path: "CompVis/stable-diffusion-v1-4"
+
+  ordinal_embedder:
+    type: "boe"             
+    num_classes: 4
+    interpolation_steps: 101
+    boe:
+      weight: 1.0
+    aoe:
+      delta_scale: 0.15
+
+optimizer:
+  name: "adamw"
+  lr: 1e-4                   
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+scheduler:
+  name: "cosine"
+  warmup_steps: 1000
+  max_steps: 100000
+  min_lr: 1e-6
+
+dataset:
+  dataset_path: train_and_validation_sets
+  val_path: "/data/progressive/val"
+  batch_size: 8
+  num_workers: 8
+  image_size: 256             
+  num_classes: 4
+  sampler: "class_balanced"
+  augmentation:
+    flip: true
+    rotation: 5
+    center_crop: 224
+    color_jitter: false
+
+training:
+  max_steps: 100000
+  val_check_interval: 1000
+  log_every_n_steps: 10
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 4
+  precision: 16
+  accelerator: "gpu"
+  devices: 1                  
+  strategy: "auto"
+  seed: 42
+  ema_decay: 0.999            
+  use_min_snr_weighting: true
+  min_snr_gamma: 1.0         
+  synth_augmentation: false
+
+wandb:
+  project: "prog-disease-generation"
+  run_name: "ordinal-aware-diffusion"
+  log_samples_every_n_steps: 1000
+  offline: True
+
+diffusion:
+  noise_schedule: "linear"
+  beta_start: 0.00085         
+  beta_end: 0.012
+  num_train_timesteps: 1000
+  sampling_steps: 50
+  guidance_scale: 2.0         
+  min_snr_gamma: 1.0
+  ema_update_interval: 10
+  nodal_scale: 1.0           
