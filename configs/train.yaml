@@ -39,8 +39,8 @@ scheduler:
 dataset:
   dataset_path: /kaggle/input/my-limuc/train_and_validation_sets/train_and_validation_sets
   val_path: "/data/progressive/val"
-  batch_size: 8
-  num_workers: 8
+  batch_size: 32
+  num_workers: 16
   image_size: 256             
   num_classes: 4
   sampler: "class_balanced"
