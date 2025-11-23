@@ -37,7 +37,7 @@ scheduler:
   min_lr: 1e-6
 
 dataset:
-  dataset_path: train_and_validation_sets
+  dataset_path: /kaggle/input/my-limuc/train_and_validation_sets/train_and_validation_sets
   val_path: "/data/progressive/val"
   batch_size: 8
   num_workers: 8
