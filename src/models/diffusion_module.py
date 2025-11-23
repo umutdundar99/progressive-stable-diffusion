@@ -54,9 +54,7 @@ class DiffusionModule(pl.LightningModule):
         super().__init__()
         self.cfg = cfg
 
-        # ------------------------------------------------------------------
-        # Diffusion configuration (DDPM-style forward process)
-        # ------------------------------------------------------------------
+
         self.diff_cfg = DiffusionConfig(
             num_train_timesteps=cfg.diffusion.num_train_timesteps,
             beta_start=cfg.diffusion.beta_start,
@@ -69,9 +67,7 @@ class DiffusionModule(pl.LightningModule):
             latent_scale=getattr(cfg.diffusion, "latent_scale", 0.18215),
         )
 
-        # ------------------------------------------------------------------
-        # VAE (frozen Stable Diffusion AutoencoderKL)
-        # ------------------------------------------------------------------
+
         if getattr(cfg.model, "use_pretrained_vae", True):
             vae_path = getattr(cfg.model, "pretrained_vae_path", cfg.model.pretrained_unet_path)
             self.vae = SDVAE(
@@ -82,9 +78,7 @@ class DiffusionModule(pl.LightningModule):
         else:
             raise ValueError("This module expects a pretrained SD VAE.")
 
-        # ------------------------------------------------------------------
-        # Ordinal embedder (BOE or AOE)
-        # ------------------------------------------------------------------
+
         emb_cfg = cfg.model.ordinal_embedder
         if emb_cfg.type.lower() == "boe":
             self.ordinal_embedder = BasicOrdinalEmbedder(
@@ -99,9 +93,7 @@ class DiffusionModule(pl.LightningModule):
         else:
             raise ValueError(f"Unknown ordinal embedder type: {emb_cfg.type}")
 
-        # ------------------------------------------------------------------
-        # UNet (Stable Diffusion v1.4 style with ordinal conditioning)
-        # ------------------------------------------------------------------
+
         unet_config = UNetConfig(
             pretrained_unet_path=cfg.model.pretrained_unet_path,
             conditioning_dim=cfg.model.conditioning_dim,
@@ -114,9 +106,6 @@ class DiffusionModule(pl.LightningModule):
         self.ema_unet = OrdinalUNet(unet_config)
         self._init_ema()
 
-        # ------------------------------------------------------------------
-        # Diffusion noise schedule buffers (DDPM forward)
-        # ------------------------------------------------------------------
         betas, alphas_cumprod = self._build_noise_schedule()
         self.register_buffer("betas", betas, persistent=False)
         self.register_buffer("alphas_cumprod", alphas_cumprod, persistent=False)
@@ -135,9 +124,6 @@ class DiffusionModule(pl.LightningModule):
         # Save hyperparameters for reproducibility (excluding non-serializable objects)
         self.save_hyperparameters(ignore=["vae", "unet", "ema_unet", "ordinal_embedder"])
 
-    # ----------------------------------------------------------------------
-    # EMA helpers
-    # ----------------------------------------------------------------------
     def _init_ema(self) -> None:
         """Initialize EMA weights to match the UNet."""
         self.ema_unet.load_state_dict(self.unet.state_dict())
@@ -153,9 +139,7 @@ class DiffusionModule(pl.LightningModule):
             ema_param = ema_params[name]
             ema_param.data.mul_(decay).add_(param.data, alpha=1.0 - decay)
 
-    # ----------------------------------------------------------------------
-    # Noise schedule (DDPM forward, currently linear)
-    # ----------------------------------------------------------------------
+
     def _build_noise_schedule(self) -> Tuple[Tensor, Tensor]:
         """
         Build beta schedule and cumulative alphas for the DDPM forward process.
