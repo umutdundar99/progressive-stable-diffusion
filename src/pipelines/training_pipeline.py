@@ -4,14 +4,18 @@ Training pipeline integrating Hydra, Lightning, and WandB.
 
 from __future__ import annotations
 
-import pytorch_lightning as pl
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import (
-    Callback,
+import lightning as pl
+from lightning import Trainer
+
+from lightning.pytorch.callbacks import (
     ModelCheckpoint,
     LearningRateMonitor,
-)
-from pytorch_lightning.loggers import WandbLogger
+    )
+
+from src.callbacks.ema_callback import EMAWeightAveraging
+
+from lightning.pytorch.loggers import WandbLogger
+# from lightning.loggers import WandbLogger
 
 import hydra
 from omegaconf import DictConfig
@@ -20,47 +24,39 @@ from src.data.datamodule import OrdinalDataModule
 from src.models.diffusion_module import DiffusionModule
 
 
-class EMACallback(Callback):
-    """Optional EMA diagnostics callback."""
-
-    def on_validation_epoch_end(self, trainer: Trainer, pl_module: DiffusionModule):
-        if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
-            return
-        # If EMA metrics needed, implement pl_module._compute_ema_norm()
-        trainer.logger.experiment.log(
-            {"ema/update_step": trainer.global_step}
-        )
-
-
 @hydra.main(version_base="1.4", config_path="../../configs", config_name="train")
 def main(cfg: DictConfig) -> None:
 
     pl.seed_everything(cfg.training.seed, workers=True)
-
-
     datamodule = OrdinalDataModule(cfg)
     diffusion = DiffusionModule(cfg)
 
     wandb_logger = WandbLogger(
-        project=cfg.wandb.project,
-        name=cfg.wandb.run_name,
-        log_model=False,
-        offline=cfg.wandb.offline,
-    )
-
+    project=cfg.wandb.project,
+    name=cfg.wandb.run_name,
+    log_model="all" if not cfg.wandb.offline else False,
+    offline=cfg.wandb.offline,
+)
 
     checkpoint_callback = ModelCheckpoint(
-        save_top_k=1,
-        every_n_train_steps=cfg.training.val_check_interval,
-        filename="ddpm-step{step:06d}",
-        save_last=True,
-        monitor=None,  # step-based checkpointing, no metric needed
+        every_n_epochs=10,            
+        save_last=True,             
+        save_top_k=1,                
+        save_on_train_epoch_end=True,
+        filename="ddpm-epoch{epoch:04d}"
+    )
+
+    ema_callback= EMAWeightAveraging(
+        decay=cfg.training.ema_decay,
+        update_starting_at_step=cfg.training.update_starting_at_step,
+        update_every_n_steps =cfg.training.update_every_n_steps
+
     )
 
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     callbacks = [
-        EMACallback(),
+        ema_callback,
         checkpoint_callback,
         lr_monitor,
     ]
@@ -69,8 +65,7 @@ def main(cfg: DictConfig) -> None:
     trainer = Trainer(
         logger=wandb_logger,
         callbacks=callbacks,
-        max_steps=cfg.training.max_steps,
-        val_check_interval=cfg.training.val_check_interval,
+        max_epochs=cfg.training.max_epochs,
         gradient_clip_val=cfg.training.gradient_clip_val,
         precision=cfg.training.precision,
         accelerator=cfg.training.accelerator,

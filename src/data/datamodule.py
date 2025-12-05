@@ -12,7 +12,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import datasets, transforms
-from pytorch_lightning import LightningDataModule
+from lightning import LightningDataModule
 
 
 class LIMUCDataset(Dataset):
@@ -82,9 +82,8 @@ class OrdinalDataModule(LightningDataModule):
         self.cfg = cfg
 
         self.dataset_path = Path(cfg.dataset.dataset_path)
-        self.val_path = Path(cfg.dataset.val_path)
+
         self.image_size = cfg.dataset.image_size
-        self.center_crop = getattr(cfg.dataset, "center_crop", None)
         self.batch_size = cfg.dataset.batch_size
         self.num_workers = cfg.dataset.num_workers
         self.augmentation = cfg.dataset.augmentation
@@ -97,8 +96,8 @@ class OrdinalDataModule(LightningDataModule):
         ops = []
 
        
-        if self.center_crop:
-            ops.append(transforms.CenterCrop(self.center_crop))
+        
+        ops.append(transforms.CenterCrop(self.augmentation["center_crop"]))
         ops.append(transforms.Resize((self.image_size, self.image_size)))
 
         
