@@ -18,7 +18,7 @@ model:
   pretrained_unet_path: "CompVis/stable-diffusion-v1-4"
 
   ordinal_embedder:
-    type: "boe"             
+    type: "aoe"             
     num_classes: 4
     interpolation_steps: 101
     boe:
@@ -31,17 +31,16 @@ optimizer:
   lr: 1e-4                   
   weight_decay: 0.01
   betas: [0.9, 0.999]
-  eps: 1e-8
 
 scheduler:
   name: "cosine"
   warmup_epochs: 2
-  max_epochs: 100  
+  max_epochs: 50  
   min_lr: 1e-6
 
 dataset:
   dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/train_and_validation_sets
-  batch_size: 64
+  batch_size: 32
   num_workers: 10
   image_size: 256             
   num_classes: 4
@@ -50,7 +49,7 @@ dataset:
     flip: true
     rotation: 5
     center_crop: 224
-    color_jitter: false
+    color_jitter: True
 
 training:
   max_epochs: 50
@@ -72,7 +71,7 @@ wandb:
   project: "prog-disease-generation"
   run_name: "ordinal-aware-diffusion"
   log_samples_every_n_steps: 50
-  offline: False
+  offline: True
 
 diffusion:
   noise_schedule: "linear"

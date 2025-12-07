@@ -13,7 +13,8 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import datasets, transforms
 from lightning import LightningDataModule
-
+import cv2
+import numyp as np
 
 class LIMUCDataset(Dataset):
     """
@@ -35,34 +36,31 @@ class LIMUCDataset(Dataset):
         root: Path,
         transform: Optional[Callable] = None,
         continuous: bool = True,
-        val_ratio: float = 0.2, 
         is_train: bool = True,
     ) -> None:
         
-        full_dataset = datasets.ImageFolder(str(root), transform=transform)
-        if not is_train:
-            val_size = int(len(full_dataset) * val_ratio)
-            train_size = len(full_dataset) - val_size
-            _, self.dataset = torch.utils.data.random_split(
-                full_dataset, [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-        else:
-            train_size = int(len(full_dataset) * (1 - val_ratio))
-            val_size = len(full_dataset) - train_size
-            self.dataset, _ = torch.utils.data.random_split(
-                full_dataset, [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
 
         self.continuous = continuous
-        self.dataset = self.dataset.dataset
+
+        self.dataset = datasets.ImageFolder(
+            root=root,
+            transform=transform,
+        )
+        
 
     def __len__(self) -> int:
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> Tuple[Tensor, float]:
         image, label = self.dataset[idx]
+        # convert image back to orginal to debug
+        original_image = image * 0.5 + 0.5  # [-1,1] -> [0,1]
+        original_image = original_image.clamp(0, 1)
+        original_image = torch.permute(original_image, (1, 2, 0)).numpy() 
+        #bgr to rgb
+        original_image = original_image[:, :, ::-1]
+        cv2.imwrite("a.png",(original_image*255).astype(np.uint8))
+          
         label_value = float(label) if self.continuous else int(label)
         return image, label_value
 
@@ -124,7 +122,6 @@ class OrdinalDataModule(LightningDataModule):
             self._train_dataset = LIMUCDataset(
                 self.dataset_path, transform=self._build_transforms(train=True)
             )
-            self._val_dataset = LIMUCDataset(self.dataset_path, transform=self._build_transforms(train=False), is_train=False)
 
  
     def _build_sampler(self, dataset: LIMUCDataset) -> Optional[WeightedRandomSampler]:
@@ -156,19 +153,6 @@ class OrdinalDataModule(LightningDataModule):
             batch_size=self.batch_size,
             sampler=sampler,
             shuffle=sampler is None,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        if self._val_dataset is None:
-            self.setup()
-        assert self._val_dataset is not None
-
-        return DataLoader(
-            self._val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
         )

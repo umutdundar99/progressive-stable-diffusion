@@ -207,3 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 train_and_validation_sets
+data
+prog-*
+outputs*

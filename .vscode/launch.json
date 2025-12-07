@@ -10,6 +10,24 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}"
       }
+    },
+    {
+      "name": "Inference Diffusion",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/inference_pipeline.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation/px6zbnx2/checkpoints/ddpm-epochepoch=0049.ckpt",
+      "--config", "configs/train.yaml",
+      "--sampling-steps", "50",
+      "--sampler", "ddim",
+      "--mes-steps", "20",
+      "--output-dir", "outputs/inferece_run7"
+      ]
     }
   ]
 }

@@ -5,9 +5,7 @@ from typing import Any, Dict, Tuple
 
 import torch
 from torch import Tensor
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import LambdaLR
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 import lightning as pl
 
@@ -25,7 +23,7 @@ class DiffusionConfig:
     sampling_steps: int = 50
     guidance_scale: float = 2.0
     min_snr_gamma: float = 1.0
-    ema_update_interval: int = 10  # artık kullanılmıyor ama cfg ile uyum için bırakıldı
+    ema_update_interval: int = 10  
     latent_scale: float = 0.18215
 
 
@@ -104,7 +102,7 @@ class DiffusionModule(pl.LightningModule):
         self.register_buffer("betas", betas, persistent=False)
         self.register_buffer("alphas_cumprod", alphas_cumprod, persistent=False)
 
-        # Previous cumulative alphas (for sampling; DDPM/DDIM kullanırken işine yarıyor)
+        # Previous cumulative alphas (for sampling; DDPM/DDIM)
         alphas_cumprod_prev = torch.cat(
             [torch.ones(1, dtype=alphas_cumprod.dtype), alphas_cumprod[:-1]],
             dim=0,
@@ -229,7 +227,6 @@ class DiffusionModule(pl.LightningModule):
     
 
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None: 
-        #debug ema callback
         pass
 
     def configure_optimizers(self) -> Dict[str, Any]:
@@ -238,12 +235,12 @@ class DiffusionModule(pl.LightningModule):
         if opt_cfg.name.lower() != "adamw":
             raise NotImplementedError(f"Only AdamW is implemented, got: {opt_cfg.name}")
 
+        params_to_optimize = list(self.unet.parameters()) + list(self.ordinal_embedder.parameters())
         optimizer = torch.optim.AdamW(
-            self.unet.parameters(),
+            params_to_optimize,
             lr=opt_cfg.lr,
             betas=tuple(opt_cfg.betas),
             weight_decay=opt_cfg.weight_decay,
-            eps=opt_cfg.eps,
         )
 
         # Learning rate scheduler
@@ -259,7 +256,7 @@ class DiffusionModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
+                "interval": "epoch",
                 "frequency": 1,
             },
         }

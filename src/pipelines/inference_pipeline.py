@@ -142,7 +142,6 @@ def _ddpm_sample(
         eps_theta = module(latents, t, cond_embed)  # (B, 4, H/8, W/8)
 
         beta_t = betas[t].view(-1, 1, 1, 1)  # (B,1,1,1)
-        alpha_t = 1.0 - beta_t
         alpha_bar_t = alphas_cumprod[t].view(-1, 1, 1, 1)
         alpha_bar_prev = alphas_cumprod_prev[t].view(-1, 1, 1, 1)
 
@@ -287,7 +286,7 @@ def _save_sequence(images: Tensor, labels: Tensor, output_dir: Path) -> None:
 def main() -> None:
     args = _parse_args()
     device = _resolve_device(args.device)
-    _set_seed(43)
+    _set_seed(4123)
 
     cfg = _load_config(args.config)
 

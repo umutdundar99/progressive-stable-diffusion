@@ -27,7 +27,6 @@ from src.models.diffusion_module import DiffusionModule
 @hydra.main(version_base="1.4", config_path="../../configs", config_name="train")
 def main(cfg: DictConfig) -> None:
 
-    pl.seed_everything(cfg.training.seed, workers=True)
     datamodule = OrdinalDataModule(cfg)
     diffusion = DiffusionModule(cfg)
 
@@ -40,8 +39,8 @@ def main(cfg: DictConfig) -> None:
 
     checkpoint_callback = ModelCheckpoint(
         every_n_epochs=10,            
-        save_last=True,             
-        save_top_k=1,                
+        save_last=False,             
+        save_top_k=-1,                
         save_on_train_epoch_end=True,
         filename="ddpm-epoch{epoch:04d}"
     )
@@ -56,7 +55,7 @@ def main(cfg: DictConfig) -> None:
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     callbacks = [
-        ema_callback,
+        #ema_callback,
         checkpoint_callback,
         lr_monitor,
     ]

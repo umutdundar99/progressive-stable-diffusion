@@ -43,7 +43,6 @@ def _linear_interpolate(
     return emb_lo * (1.0 - alpha) + emb_hi * alpha
 
 
-
 class BasicOrdinalEmbedder(nn.Module):
     """
     BOE (Basic Ordinal Embedding)
@@ -177,4 +176,12 @@ class AdditiveOrdinalEmbedder(nn.Module):
 
         # Bounds
         lower = torch.floor(labels)
-        upper = to
+        upper = torch.clamp(lower + 1, max=max_idx)
+        alpha = labels - lower
+        out = _linear_interpolate(
+            table,
+            lower.long(),
+            upper.long(),
+            alpha,
+        )
+        return out.squeeze(0) if scalar_input else out
