@@ -136,7 +136,7 @@ def _ddpm_sample(
         t = torch.full((num_samples,), t_step, dtype=torch.long, device=device)
 
         # Ordinal conditioning (same labels reused for all t)
-        cond_embed = module.ordinal_embedder(labels)  # (B, D)
+        cond_embed = module.ordinal_embedder(labels,is_training=False)  # (B, D)
 
         # Use EMA UNet for better samples
         eps_theta = module(latents, t, cond_embed)  # (B, 4, H/8, W/8)
@@ -208,7 +208,7 @@ def _ddim_sample(
         t_int = int(t_scalar.item())
         t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
 
-        cond_embed = module.ordinal_embedder(labels)
+        cond_embed = module.ordinal_embedder(labels, is_training=False)
         eps_theta = module(latents, t, cond_embed)
 
         alpha_bar_t = alphas_cumprod[t_int]

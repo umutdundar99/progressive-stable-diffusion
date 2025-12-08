@@ -73,7 +73,7 @@ class BasicOrdinalEmbedder(nn.Module):
             with torch.no_grad():
                 self.embeddings[padding_idx].zero_()
 
-    def forward(self, labels: torch.Tensor) -> torch.Tensor:
+    def forward(self, labels: torch.Tensor, is_training:bool=True) -> torch.Tensor:
         """
         Args:
             labels: Tensor scalar or (...,) with values in [0, K-1]
@@ -153,7 +153,7 @@ class AdditiveOrdinalEmbedder(nn.Module):
         )
         return self.base.unsqueeze(0) + offsets
 
-    def forward(self, labels: torch.Tensor) -> torch.Tensor:
+    def forward(self, labels: torch.Tensor, is_training:bool=True) -> torch.Tensor:
         """
         Args:
             labels: scalar or (...,) in [0, K-1]
@@ -184,4 +184,10 @@ class AdditiveOrdinalEmbedder(nn.Module):
             upper.long(),
             alpha,
         )
+
+        #add gaussian noise during training for regularization
+        if is_training:
+            noise = torch.randn_like(out) * 0.01
+            out = out + noise
+
         return out.squeeze(0) if scalar_input else out

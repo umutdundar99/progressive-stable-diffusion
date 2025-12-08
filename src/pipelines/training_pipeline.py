@@ -55,7 +55,7 @@ def main(cfg: DictConfig) -> None:
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     callbacks = [
-        #ema_callback,
+        ema_callback,
         checkpoint_callback,
         lr_monitor,
     ]
