@@ -4,52 +4,45 @@ Training pipeline integrating Hydra, Lightning, and WandB.
 
 from __future__ import annotations
 
-import lightning as pl
-from lightning import Trainer
-
-from lightning.pytorch.callbacks import (
-    ModelCheckpoint,
-    LearningRateMonitor,
-    )
-
-from src.callbacks.ema_callback import EMAWeightAveraging
-
-from lightning.pytorch.loggers import WandbLogger
 # from lightning.loggers import WandbLogger
-
 import hydra
+from lightning import Trainer
+from lightning.pytorch.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 
+from src.callbacks.ema_callback import EMAWeightAveraging
 from src.data.datamodule import OrdinalDataModule
 from src.models.diffusion_module import DiffusionModule
 
 
 @hydra.main(version_base="1.4", config_path="../../configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-
     datamodule = OrdinalDataModule(cfg)
     diffusion = DiffusionModule(cfg)
 
     wandb_logger = WandbLogger(
-    project=cfg.wandb.project,
-    name=cfg.wandb.run_name,
-    log_model="all" if not cfg.wandb.offline else False,
-    offline=cfg.wandb.offline,
-)
-
-    checkpoint_callback = ModelCheckpoint(
-        every_n_epochs=10,            
-        save_last=False,             
-        save_top_k=-1,                
-        save_on_train_epoch_end=True,
-        filename="ddpm-epoch{epoch:04d}"
+        project=cfg.wandb.project,
+        name=cfg.wandb.run_name,
+        log_model="all" if not cfg.wandb.offline else False,
+        offline=cfg.wandb.offline,
     )
 
-    ema_callback= EMAWeightAveraging(
+    checkpoint_callback = ModelCheckpoint(
+        every_n_epochs=10,
+        save_last=False,
+        save_top_k=-1,
+        save_on_train_epoch_end=True,
+        filename="ddpm-epoch{epoch:04d}",
+    )
+
+    ema_callback = EMAWeightAveraging(
         decay=cfg.training.ema_decay,
         update_starting_at_step=cfg.training.update_starting_at_step,
-        update_every_n_steps =cfg.training.update_every_n_steps
-
+        update_every_n_steps=cfg.training.update_every_n_steps,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval="step")
@@ -59,7 +52,6 @@ def main(cfg: DictConfig) -> None:
         checkpoint_callback,
         lr_monitor,
     ]
-
 
     trainer = Trainer(
         logger=wandb_logger,
@@ -76,8 +68,8 @@ def main(cfg: DictConfig) -> None:
         deterministic=False,
         enable_checkpointing=True,
         accumulate_grad_batches=cfg.training.get("accumulate_grad_batches", 1),
+        benchmark=True,  # Enable cudnn.benchmark for faster training
     )
-
 
     trainer.fit(model=diffusion, datamodule=datamodule)
 

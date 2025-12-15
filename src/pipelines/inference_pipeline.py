@@ -13,7 +13,6 @@ from torch import Tensor
 from src.models.diffusion_module import DiffusionModule
 
 
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate MES progression samples from a trained diffusion model."
@@ -48,13 +47,7 @@ def _parse_args() -> argparse.Namespace:
         default=50,
         help="Number of diffusion steps used during sampling (for DDIM).",
     )
-    parser.add_argument(
-        "--sampler",
-        type=str,
-        choices=["ddpm", "ddim"],
-        default="ddim",
-        help="Sampling method to use: ddpm (full schedule) or ddim (subsampled schedule).",
-    )
+
     parser.add_argument(
         "--device",
         type=str,
@@ -67,8 +60,13 @@ def _parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed used for sampling.",
     )
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=2,
+        help="CFG guidance scale (default: use value from config).",
+    )
     return parser.parse_args()
-
 
 
 def _resolve_device(device_str: str) -> torch.device:
@@ -99,72 +97,9 @@ def _build_labels(
     device = device or torch.device("cpu")
     if num_steps <= 0:
         raise ValueError("`mes_steps` must be a positive integer.")
-    return torch.linspace(start, end, steps=num_steps, device=device, dtype=torch.float32)
-
-
-
-def _ddpm_sample(
-    module: DiffusionModule,
-    labels: Tensor,
-    device: torch.device,
-) -> Tensor:
-    """
-    Stochastic DDPM sampling using the *full* training noise schedule.
-
-    - Uses timesteps T-1, ..., 0 (no subsampling).
-    - Uses the standard DDPM posterior mean and variance formulas.
-    """
-    num_samples = labels.shape[0]
-    height = module.cfg.dataset.image_size
-
-    T = module.diff_cfg.num_train_timesteps
-    betas = module.betas                 # (T,)
-    alphas_cumprod = module.alphas_cumprod          # (T,)
-    alphas_cumprod_prev = module.alphas_cumprod_prev  # (T,)
-
-    # Start from pure noise
-    latents = torch.randn(
-        num_samples,
-        module.cfg.model.latent_channels,
-        height // 8,
-        height // 8,
-        device=device,
-        dtype=torch.float32,
+    return torch.linspace(
+        start, end, steps=num_steps, device=device, dtype=torch.float32
     )
-
-    for t_step in reversed(range(T)):
-        t = torch.full((num_samples,), t_step, dtype=torch.long, device=device)
-
-        # Ordinal conditioning (same labels reused for all t)
-        cond_embed = module.ordinal_embedder(labels,is_training=False)  # (B, D)
-
-        # Use EMA UNet for better samples
-        eps_theta = module(latents, t, cond_embed)  # (B, 4, H/8, W/8)
-
-        beta_t = betas[t].view(-1, 1, 1, 1)  # (B,1,1,1)
-        alpha_bar_t = alphas_cumprod[t].view(-1, 1, 1, 1)
-        alpha_bar_prev = alphas_cumprod_prev[t].view(-1, 1, 1, 1)
-
-        # Predict x0 from x_t and eps_theta
-        sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
-        sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - alpha_bar_t)
-
-        x0_pred = (latents - sqrt_one_minus_alpha_bar_t * eps_theta) / sqrt_alpha_bar_t
-
-        # DDPM posterior mean
-        sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
-        sqrt_one_minus_alpha_bar_prev = torch.sqrt(1.0 - alpha_bar_prev)
-        mean = sqrt_alpha_bar_prev * x0_pred + sqrt_one_minus_alpha_bar_prev * eps_theta
-
-        if t_step > 0:
-            # Posterior variance
-            posterior_var = beta_t * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t + 1e-8)
-            noise = torch.randn_like(latents)
-            latents = mean + torch.sqrt(posterior_var) * noise
-        else:
-            latents = mean
-
-    return latents
 
 
 def _ddim_sample(
@@ -173,25 +108,31 @@ def _ddim_sample(
     sampling_steps: int,
     device: torch.device,
     eta: float = 0.0,
+    guidance_scale: float | None = None,
 ) -> Tensor:
     """DDIM sampling (deterministic when eta=0)."""
     num_samples = labels.shape[0]
     height = module.cfg.dataset.image_size
     T = module.diff_cfg.num_train_timesteps
 
+    # Use provided guidance_scale or fall back to config
+    if guidance_scale is None:
+        guidance_scale = module.diff_cfg.guidance_scale
+
     if sampling_steps > T:
         raise ValueError(
             f"sampling_steps={sampling_steps} must be <= num_train_timesteps={T} for DDIM sampling."
         )
 
-    latents = torch.randn(
-        num_samples,
+    single_latent = torch.randn(
+        1,
         module.cfg.model.latent_channels,
         height // 8,
         height // 8,
         device=device,
         dtype=torch.float32,
     )
+    latents = single_latent.repeat(num_samples, 1, 1, 1)
 
     alphas_cumprod = module.alphas_cumprod  # (T,)
 
@@ -204,27 +145,50 @@ def _ddim_sample(
         device=device,
     )
 
+    con_embed = module.ordinal_embedder(labels, is_training=False, unconditional=False)
+    # "Mayo 0 (normal mucosa) serves as the negative prompt for higher severity levels"
+    # "Mayo 1 serves as the negative prompt for Mayo 0"
+    # This emphasizes distinctive features by contrasting against other severity levels
+    uncond_embed = module.ordinal_embedder.get_negative_embedding(
+        labels, is_training=False
+    )
+    embed = torch.cat([uncond_embed, con_embed], dim=0)  # (2*B, D)
+
     for i, t_scalar in enumerate(timesteps):
         t_int = int(t_scalar.item())
         t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
 
-        cond_embed = module.ordinal_embedder(labels, is_training=False)
-        eps_theta = module(latents, t, cond_embed)
+        latent_model_input = torch.cat([latents, latents], dim=0)  # (2*B, 4, H, W)
+
+        t_model_input = torch.cat([t, t], dim=0)  # (2*B,)
+
+        noise_pred = module(latent_model_input, t_model_input, embed)
+        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+
+        eps_theta = noise_pred_uncond + guidance_scale * (
+            noise_pred_cond - noise_pred_uncond
+        )
 
         alpha_bar_t = alphas_cumprod[t_int]
         alpha_bar_t = alpha_bar_t.to(device=latents.device, dtype=latents.dtype)
-
-        if i == sampling_steps - 1:
-            alpha_bar_prev = torch.tensor(1.0, device=latents.device, dtype=latents.dtype)
-        else:
-            t_prev_int = int(timesteps[i + 1].item())
-            alpha_bar_prev = alphas_cumprod[t_prev_int]
-            alpha_bar_prev = alpha_bar_prev.to(device=latents.device, dtype=latents.dtype)
 
         sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
         sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - alpha_bar_t)
 
         x0_pred = (latents - sqrt_one_minus_alpha_bar_t * eps_theta) / sqrt_alpha_bar_t
+
+        # Clip x0 prediction for stability (latent space typically in [-4, 4] range)
+        x0_pred = x0_pred.clamp(-4.0, 4.0)
+
+        # At the final step (t=0), return x0_pred directly
+        # Going beyond t=0 with alpha_bar_prev=1.0 causes artifacts
+        if i == sampling_steps - 1:
+            latents = x0_pred
+            continue
+
+        t_prev_int = int(timesteps[i + 1].item())
+        alpha_bar_prev = alphas_cumprod[t_prev_int]
+        alpha_bar_prev = alpha_bar_prev.to(device=latents.device, dtype=latents.dtype)
 
         sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
         sqrt_one_minus_alpha_bar_prev = torch.sqrt(1.0 - alpha_bar_prev)
@@ -237,12 +201,10 @@ def _ddim_sample(
             )
         else:
             # Stochastic DDIM
-            sigma = (
-                eta
-                * torch.sqrt(
-                    (1 - alpha_bar_prev) / (1 - alpha_bar_t)
-                    * (1 - alpha_bar_t / alpha_bar_prev)
-                )
+            sigma = eta * torch.sqrt(
+                (1 - alpha_bar_prev)
+                / (1 - alpha_bar_t)
+                * (1 - alpha_bar_t / alpha_bar_prev)
             )
             noise = torch.randn_like(latents)
             latents = (
@@ -252,7 +214,6 @@ def _ddim_sample(
             )
 
     return latents
-
 
 
 def _latents_to_images(module: DiffusionModule, latents: Tensor) -> Tensor:
@@ -282,11 +243,10 @@ def _save_sequence(images: Tensor, labels: Tensor, output_dir: Path) -> None:
         pil_image.save(filename)
 
 
-
 def main() -> None:
     args = _parse_args()
     device = _resolve_device(args.device)
-    _set_seed(4123)
+    _set_seed(args.seed)  # Use seed from command line argument
 
     cfg = _load_config(args.config)
 
@@ -301,12 +261,14 @@ def main() -> None:
     labels = _build_labels(args.mes_steps, device=device)
 
     with torch.no_grad():
-        if args.sampler == "ddpm":
-            # DDPM: always use full schedule (training T steps)
-            latents = _ddpm_sample(module, labels, device)
-        else:
-            # DDIM: use subsampled schedule with `sampling_steps`
-            latents = _ddim_sample(module, labels, args.sampling_steps, device, eta=0.0)
+        latents = _ddim_sample(
+            module,
+            labels,
+            args.sampling_steps,
+            device,
+            eta=0.0,
+            guidance_scale=args.guidance_scale,
+        )
 
         images = _latents_to_images(module, latents)
         _save_sequence(images, labels, args.output_dir)

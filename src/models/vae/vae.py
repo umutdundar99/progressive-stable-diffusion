@@ -19,14 +19,12 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch
-from torch import Tensor, nn
-
 from diffusers import AutoencoderKL
-from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKLOutput
 from diffusers.models.autoencoders.autoencoder_kl import (
     AutoencoderKLOutput,
     DecoderOutput,
 )
+from torch import Tensor, nn
 
 PretrainedPath = Union[str, Path]
 
@@ -69,7 +67,6 @@ class SDVAE(nn.Module):
         # Set to eval & freeze parameters
         self.vae.eval()
         self.vae.requires_grad_(False)
-
 
     @torch.no_grad()
     def encode(

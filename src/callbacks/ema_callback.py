@@ -20,15 +20,14 @@ import itertools
 from copy import deepcopy
 from typing import Any, Optional, Union
 
-import torch
-from torch.optim.swa_utils import AveragedModel, get_ema_avg_fn
-from typing_extensions import override
-
 import lightning.pytorch as pl
+import torch
 from lightning.pytorch.callbacks.callback import Callback
 from lightning.pytorch.utilities.model_helpers import is_overridden
 from lightning.pytorch.utilities.rank_zero import rank_zero_info, rank_zero_warn
 from lightning.pytorch.utilities.types import STEP_OUTPUT
+from torch.optim.swa_utils import AveragedModel, get_ema_avg_fn
+from typing_extensions import override
 
 
 class WeightAveraging(Callback):
@@ -112,7 +111,9 @@ class WeightAveraging(Callback):
         # epoch.
         self._latest_update_epoch = -1
 
-    def should_update(self, step_idx: Optional[int] = None, epoch_idx: Optional[int] = None) -> bool:
+    def should_update(
+        self, step_idx: Optional[int] = None, epoch_idx: Optional[int] = None
+    ) -> bool:
         """Called after every optimizer step and after every training epoch to check whether the average model should
         be updated.
 
@@ -131,7 +132,9 @@ class WeightAveraging(Callback):
         return step_idx is not None
 
     @override
-    def setup(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", stage: str) -> None:
+    def setup(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", stage: str
+    ) -> None:
         """Called when fit, validate, test, predict, or tune begins.
 
         Creates an :class:`AveragedModel` when fit begins.
@@ -155,12 +158,20 @@ class WeightAveraging(Callback):
                 pl_module.configure_model()
 
             self._average_model = AveragedModel(
-                model=pl_module, device=device, use_buffers=self._use_buffers, **self._kwargs
+                model=pl_module,
+                device=device,
+                use_buffers=self._use_buffers,
+                **self._kwargs,
             )
 
     @override
     def on_train_batch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", outputs: STEP_OUTPUT, batch: Any, batch_idx: int
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
     ) -> None:
         """Called when a training batch ends.
 
@@ -177,13 +188,17 @@ class WeightAveraging(Callback):
         # trainer.global_step is the number of optimizer steps taken so far, i.e. 1 after the first optimizer step. To
         # make step_idx consistent with epoch_idx, we'll pass a zero-based index.
         step_idx = trainer.global_step - 1
-        if (trainer.global_step > self._latest_update_step) and self.should_update(step_idx=step_idx):
+        if (trainer.global_step > self._latest_update_step) and self.should_update(
+            step_idx=step_idx
+        ):
             assert self._average_model is not None
             self._average_model.update_parameters(pl_module)
             self._latest_update_step = trainer.global_step
 
     @override
-    def on_train_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+    def on_train_epoch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
         """Called when a training epoch ends.
 
         Updates the :class:`AveragedModel` parameters, if requested by ``self.should_update()``.
@@ -193,13 +208,17 @@ class WeightAveraging(Callback):
             pl_module: The current :class:`~lightning.pytorch.core.LightningModule` instance.
 
         """
-        if (trainer.current_epoch > self._latest_update_epoch) and self.should_update(epoch_idx=trainer.current_epoch):
+        if (trainer.current_epoch > self._latest_update_epoch) and self.should_update(
+            epoch_idx=trainer.current_epoch
+        ):
             assert self._average_model is not None
             self._average_model.update_parameters(pl_module)
             self._latest_update_epoch = trainer.current_epoch
 
     @override
-    def on_train_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+    def on_train_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
         """Called when training ends.
 
         Transfers parameters from the :class:`AveragedModel` to the current model.
@@ -213,7 +232,9 @@ class WeightAveraging(Callback):
         self._copy_average_to_current(pl_module)
 
     @override
-    def on_validation_epoch_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+    def on_validation_epoch_start(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
         """Called when a validation epoch begins.
 
         Transfers parameter values from the :class:`AveragedModel` to the current model.
@@ -227,7 +248,9 @@ class WeightAveraging(Callback):
             self._swap_models(pl_module)
 
     @override
-    def on_validation_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+    def on_validation_epoch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
         """Called when a validation epoch ends.
 
         Recovers the current model parameters from the :class:`AveragedModel`.
@@ -266,7 +289,10 @@ class WeightAveraging(Callback):
 
     @override
     def on_save_checkpoint(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", checkpoint: dict[str, Any]
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        checkpoint: dict[str, Any],
     ) -> None:
         r"""Called when saving a checkpoint.
 
@@ -292,15 +318,22 @@ class WeightAveraging(Callback):
             # Truncate the "module." prefix (the first 7 characters) from the names of the variables in the
             # AveragedModel state.
             checkpoint["state_dict"] = {
-                name[7:]: value for name, value in average_model_state.items() if name.startswith("module.")
+                name[7:]: value
+                for name, value in average_model_state.items()
+                if name.startswith("module.")
             }
             checkpoint["averaging_state"] = {
-                name: value for name, value in average_model_state.items() if not name.startswith("module.")
+                name: value
+                for name, value in average_model_state.items()
+                if not name.startswith("module.")
             }
 
     @override
     def on_load_checkpoint(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", checkpoint: dict[str, Any]
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        checkpoint: dict[str, Any],
     ) -> None:
         r"""Called when loading a model checkpoint.
 
@@ -318,9 +351,16 @@ class WeightAveraging(Callback):
                 "WeightAveraging state cannot be restored. If you're using the checkpoint for prediction or testing, "
                 "you can ignore this warning. To disable the warning, remove the WeightAveraging callback."
             )
-        elif ("current_model_state" in checkpoint) and ("averaging_state" in checkpoint):
-            rank_zero_info("Found current_model_state in the checkpoint. This will be used to initialize the model.")
-            average_model_state = {"module." + name: value for name, value in checkpoint["state_dict"].items()}
+        elif ("current_model_state" in checkpoint) and (
+            "averaging_state" in checkpoint
+        ):
+            rank_zero_info(
+                "Found current_model_state in the checkpoint. This will be used to initialize the model."
+            )
+            average_model_state = {
+                "module." + name: value
+                for name, value in checkpoint["state_dict"].items()
+            }
             average_model_state |= checkpoint["averaging_state"]
             self._average_model.load_state_dict(average_model_state)
             # The current model state has already been loaded from "state_dict" (which contains the average model
@@ -332,7 +372,9 @@ class WeightAveraging(Callback):
                 "The checkpoint was not created with WeightAveraging. Both the current and the average model will be "
                 "initialized with state_dict."
             )
-            self._average_model.module.load_state_dict(deepcopy(checkpoint["state_dict"]), strict=False)
+            self._average_model.module.load_state_dict(
+                deepcopy(checkpoint["state_dict"]), strict=False
+            )
 
     def _swap_models(self, pl_module: "pl.LightningModule") -> None:
         """Swaps the parameter values of the current model and the :class:`AveragedModel`.
@@ -342,7 +384,10 @@ class WeightAveraging(Callback):
 
         """
         assert self._average_model is not None
-        average_params = itertools.chain(self._average_model.module.parameters(), self._average_model.module.buffers())
+        average_params = itertools.chain(
+            self._average_model.module.parameters(),
+            self._average_model.module.buffers(),
+        )
         current_params = itertools.chain(pl_module.parameters(), pl_module.buffers())
         for average_param, current_param in zip(average_params, current_params):
             tmp = average_param.data.clone()
@@ -357,7 +402,10 @@ class WeightAveraging(Callback):
 
         """
         assert self._average_model is not None
-        average_params = itertools.chain(self._average_model.module.parameters(), self._average_model.module.buffers())
+        average_params = itertools.chain(
+            self._average_model.module.parameters(),
+            self._average_model.module.buffers(),
+        )
         current_params = itertools.chain(pl_module.parameters(), pl_module.buffers())
         for average_param, current_param in zip(average_params, current_params):
             current_param.data.copy_(average_param.data)
@@ -387,7 +435,9 @@ class EMAWeightAveraging(WeightAveraging):
         self.update_starting_at_step = update_starting_at_step
         self.update_starting_at_epoch = update_starting_at_epoch
 
-    def should_update(self, step_idx: Optional[int] = None, epoch_idx: Optional[int] = None) -> bool:
+    def should_update(
+        self, step_idx: Optional[int] = None, epoch_idx: Optional[int] = None
+    ) -> bool:
         """Decide when to update the model weights.
 
         Args:
@@ -399,15 +449,22 @@ class EMAWeightAveraging(WeightAveraging):
         """
         if step_idx is not None:
             # Check step-based conditions only if we have a valid step_idx
-            meets_step_requirement = self.update_starting_at_step is None or step_idx >= self.update_starting_at_step
-            meets_step_frequency = self.update_every_n_steps > 0 and step_idx % self.update_every_n_steps == 0
+            meets_step_requirement = (
+                self.update_starting_at_step is None
+                or step_idx >= self.update_starting_at_step
+            )
+            meets_step_frequency = (
+                self.update_every_n_steps > 0
+                and step_idx % self.update_every_n_steps == 0
+            )
             if meets_step_requirement and meets_step_frequency:
                 return True
 
         if epoch_idx is not None:
             # Check epoch-based condition only if we specify one
             meets_epoch_requirement = (
-                self.update_starting_at_epoch is not None and epoch_idx >= self.update_starting_at_epoch
+                self.update_starting_at_epoch is not None
+                and epoch_idx >= self.update_starting_at_epoch
             )
             if meets_epoch_requirement:
                 return True

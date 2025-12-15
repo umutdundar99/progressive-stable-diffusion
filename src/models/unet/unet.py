@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from torch import Tensor, nn
-
 from diffusers import UNet2DConditionModel
+from torch import Tensor, nn
 
 
 @dataclass
@@ -124,10 +123,8 @@ class OrdinalUNet(nn.Module):
                 f"cond_embed must have shape (B, D), got {cond_embed.shape}"
             )
 
-      
         encoder_hidden_states = cond_embed.unsqueeze(1)  # (B, 1, D)
 
-      
         if timesteps.ndim == 0:
             timesteps = timesteps[None]
         elif timesteps.ndim > 1:
@@ -140,5 +137,5 @@ class OrdinalUNet(nn.Module):
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
         )
-  
+
         return out.sample
