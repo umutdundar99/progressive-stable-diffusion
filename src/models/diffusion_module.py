@@ -193,24 +193,6 @@ class DiffusionModule(pl.LightningModule):
         weight = clipped / (snr + 1e-8)
         return weight
 
-    def _get_negative_labels(self, labels: Tensor) -> Tensor:
-        """
-        Get negative conditioning labels
-        - Mayo 0 -> negative is Mayo 1
-        - Mayo 1, 2, 3 -> negative is Mayo 0
-
-        Args:
-            labels: Tensor of MES values in [0, K-1]
-
-        Returns:
-            Negative labels tensor
-        """
-        return torch.where(
-            labels < 0.5,  # Mayo 0 (including interpolated values close to 0)
-            torch.ones_like(labels),  # Use Mayo 1 as negative
-            torch.zeros_like(labels),  # Use Mayo 0 as negative for all others
-        )
-
     def forward(
         self,
         latents: Tensor,

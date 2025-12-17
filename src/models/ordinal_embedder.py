@@ -129,9 +129,18 @@ class BasicOrdinalEmbedder(nn.Module):
         is_training: bool = False,
     ) -> torch.Tensor:
         """
-        Get negative conditioning embeddings
-        - Mayo 0 (normal mucosa) serves as negative prompt for higher severity (Mayo 1, 2, 3)
-        - Mayo 1 serves as negative prompt for Mayo 0
+        Get negative conditioning embeddings with SMOOTH interpolation.
+        
+        Per thesis Section 3.5:
+        - Mayo 0 (normal mucosa) contrasts against Mayo 1 features
+        - Mayo 1+ contrasts against Mayo 0 (healthy) features
+        
+        To avoid discontinuity at intermediate values, we smoothly interpolate:
+        - At label=0: negative_label = 1.0 (contrast against mild disease)
+        - At label=1: negative_label = 0.0 (contrast against healthy)
+        - At label>=1: negative_label = 0.0 (contrast against healthy)
+        
+        This creates smooth CFG guidance across the severity spectrum.
 
         Args:
             labels: Tensor of MES values in [0, K-1]
@@ -144,13 +153,11 @@ class BasicOrdinalEmbedder(nn.Module):
         if scalar_input:
             labels = labels.unsqueeze(0)
 
-        # Mayo 0 -> negative is Mayo 1
-        # Mayo 1, 2, 3 -> negative is Mayo 0
-        negative_labels = torch.where(
-            labels < 0.5,  # Mayo 0 (including interpolated values close to 0)
-            torch.ones_like(labels),  # Use Mayo 1 as negative
-            torch.zeros_like(labels),  # Use Mayo 0 as negative for all others
-        )
+        # Smooth interpolation of negative labels:
+        # negative_label = max(0, 1 - label) for label in [0, 1]
+        # negative_label = 0 for label > 1
+        # This gives: label=0 -> neg=1, label=0.25 -> neg=0.75, label=0.5 -> neg=0.5, label=1+ -> neg=0
+        negative_labels = torch.clamp(1.0 - labels, min=0.0, max=1.0)
 
         return self.forward(
             negative_labels, is_training=is_training, unconditional=False
@@ -309,12 +316,18 @@ class AdditiveOrdinalEmbedder(nn.Module):
         noise_std: float = 0.005,  # Reduced from 0.01 for more stable training
     ) -> torch.Tensor:
         """
-        Get negative conditioning embeddings
-        - Mayo 0 (normal mucosa) serves as negative prompt for higher severity (Mayo 1, 2, 3)
-        - Mayo 1 serves as negative prompt for Mayo 0
-
-        This approach encourages the model to emphasize distinctive features of each
-        severity level by explicitly contrasting them against features of other levels.
+        Get negative conditioning embeddings with SMOOTH interpolation.
+        
+        Per thesis Section 3.5:
+        - Mayo 0 (normal mucosa) contrasts against Mayo 1 features
+        - Mayo 1+ contrasts against Mayo 0 (healthy) features
+        
+        To avoid discontinuity at intermediate values, we smoothly interpolate:
+        - At label=0: negative_label = 1.0 (contrast against mild disease)
+        - At label=1: negative_label = 0.0 (contrast against healthy)
+        - At label>=1: negative_label = 0.0 (contrast against healthy)
+        
+        This creates smooth CFG guidance across the severity spectrum.
 
         Args:
             labels: Tensor of MES values in [0, K-1]
@@ -328,13 +341,11 @@ class AdditiveOrdinalEmbedder(nn.Module):
         if scalar_input:
             labels = labels.unsqueeze(0)
 
-        # Mayo 0 -> negative is Mayo 1
-        # Mayo 1, 2, 3 -> negative is Mayo 0
-        negative_labels = torch.where(
-            labels < 0.5,  # Mayo 0 (including interpolated values close to 0)
-            torch.ones_like(labels),  # Use Mayo 1 as negative
-            torch.zeros_like(labels),  # Use Mayo 0 as negative for all others
-        )
+        # Smooth interpolation of negative labels:
+        # negative_label = max(0, 1 - label) for label in [0, 1]
+        # negative_label = 0 for label > 1
+        # This gives: label=0 -> neg=1, label=0.25 -> neg=0.75, label=0.5 -> neg=0.5, label=1+ -> neg=0
+        negative_labels = torch.clamp(1.0 - labels, min=0.0, max=1.0)
 
         return self.forward(
             negative_labels,
