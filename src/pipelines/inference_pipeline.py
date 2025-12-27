@@ -258,7 +258,9 @@ def main() -> None:
     module = module.to(torch.float32)
     module.eval()
 
-    labels = _build_labels(args.mes_steps, device=device)
+    labels = _build_labels(args.mes_steps, 
+                           end=cfg.dataset.num_classes - 1,
+                           device=device)
 
     with torch.no_grad():
         latents = _ddim_sample(

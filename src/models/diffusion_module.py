@@ -25,7 +25,6 @@ class DiffusionConfig:
     min_snr_gamma: float = 1.0
     ema_update_interval: int = 10
     latent_scale: float = 0.18215
-    # Advanced training options
     noise_offset: float = 0.0
     input_perturbation: float = 0.0
 

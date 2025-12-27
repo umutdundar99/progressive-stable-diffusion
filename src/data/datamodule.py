@@ -110,14 +110,14 @@ class OrdinalDataModule(LightningDataModule):
                 os.path.join(self.dataset_path, "train"),
                 transform=self._build_transforms(train=True),
             )
-            self._val_dataset = LIMUCDataset(
-                os.path.join(self.dataset_path, "val"),
-                transform=self._build_transforms(train=False),
-            )
-            self._test_dataset = LIMUCDataset(
-                os.path.join(self.dataset_path, "test"),
-                transform=self._build_transforms(train=False),
-            )
+            # self._val_dataset = LIMUCDataset(
+            #     os.path.join(self.dataset_path, "val"),
+            #     transform=self._build_transforms(train=False),
+            # )
+            # self._test_dataset = LIMUCDataset(
+            #     os.path.join(self.dataset_path, "test"),
+            #     transform=self._build_transforms(train=False),
+            # )
 
     def _build_sampler(self, dataset: LIMUCDataset) -> Optional[WeightedRandomSampler]:
         if self.sampler != "class_balanced":
@@ -154,32 +154,32 @@ class OrdinalDataModule(LightningDataModule):
             drop_last=True,  # Avoid issues with batch norm on small last batches
         )
 
-    def val_dataloader(self) -> DataLoader:
-        if self._val_dataset is None:
-            self.setup()
+    # def val_dataloader(self) -> DataLoader:
+    #     if self._val_dataset is None:
+    #         self.setup()
 
-        assert self._val_dataset is not None
+    #     assert self._val_dataset is not None
 
-        return DataLoader(
-            self._val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            persistent_workers=self.persistent_workers and self.num_workers > 0,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
-        )
+    #     return DataLoader(
+    #         self._val_dataset,
+    #         batch_size=self.batch_size,
+    #         shuffle=False,
+    #         num_workers=self.num_workers,
+    #         pin_memory=True,
+    #         persistent_workers=self.persistent_workers and self.num_workers > 0,
+    #         prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+    #     )
 
-    def test_dataloader(self) -> DataLoader:
-        if self._test_dataset is None:
-            self.setup()
+    # def test_dataloader(self) -> DataLoader:
+    #     if self._test_dataset is None:
+    #         self.setup()
 
-        assert self._test_dataset is not None
+    #     assert self._test_dataset is not None
 
-        return DataLoader(
-            self._test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
+    #     return DataLoader(
+    #         self._test_dataset,
+    #         batch_size=self.batch_size,
+    #         shuffle=False,
+    #         num_workers=self.num_workers,
+    #         pin_memory=True,
+    #     )
