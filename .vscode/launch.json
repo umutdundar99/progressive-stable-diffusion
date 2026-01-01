@@ -5,7 +5,7 @@
       "name": "Train Diffusion",
       "type": "python",
       "request": "launch",
-      "program": "${workspaceFolder}/src/pipelines/training_pipeline.py",
+      "program": "${workspaceFolder}/src/pipelines/training_pipeline_ip.py",
       "console": "integratedTerminal",
       "env": {
         "PYTHONPATH": "${workspaceFolder}"
@@ -15,18 +15,24 @@
       "name": "Inference Diffusion",
       "type": "python",
       "request": "launch",
-      "program": "${workspaceFolder}/src/pipelines/inference_pipeline.py",
+      "program": "${workspaceFolder}/src/pipelines/inference_pipeline_ip.py",
       "console": "integratedTerminal",
       "env": {
       "PYTHONPATH": "${workspaceFolder}"
       },
       "args": [
-      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation/px6zbnx2/checkpoints/ddpm-epochepoch=0049.ckpt",
-      "--config", "configs/train.yaml",
+      //"--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/8dituazg_4th_try_noblur_all_same_weight/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/rzczftqi_second_try/checkpoints/ip-ddpm-epochepoch=0099.ckpt",
+      "--config", "configs/train_ip.yaml",
       "--sampling-steps", "50",
-      "--sampler", "ddim",
       "--mes-steps", "20",
-      "--output-dir", "outputs/inferece_run7"
+      "--output-dir", "outputs2/inferece_ip_blur_second_try_3_3levelimg_imgscale1",
+      // "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/0/UC_patient_40_7.bmp",
+      //"--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/1/UC_patient_448_54.bmp",
+      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_239_112.bmp",
+      //"--no-blur",
+      "--image-scale", "1",
+      "--guidance-scale", "1.0"
       ]
     }
   ]

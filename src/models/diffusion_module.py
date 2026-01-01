@@ -107,16 +107,16 @@ class DiffusionModule(pl.LightningModule):
         if getattr(cfg.training, "gradient_checkpointing", False):
             if hasattr(self.unet.unet, "enable_gradient_checkpointing"):
                 self.unet.unet.enable_gradient_checkpointing()
-                print("✓ Gradient checkpointing enabled for UNet")
+                print("Gradient checkpointing enabled for UNet")
 
         # torch.compile for speedup (PyTorch 2.0+)
         if getattr(cfg.training, "use_compile", False):
             compile_mode = getattr(cfg.training, "compile_mode", "reduce-overhead")
             try:
                 self.unet = torch.compile(self.unet, mode=compile_mode)
-                print(f"✓ torch.compile enabled with mode='{compile_mode}'")
+                print(f"torch.compile enabled with mode='{compile_mode}'")
             except Exception as e:
-                print(f"⚠ torch.compile failed: {e}. Continuing without compilation.")
+                print(f"torch.compile failed: {e}. Continuing without compilation.")
 
         betas, alphas_cumprod = self._build_noise_schedule()
         self.register_buffer("betas", betas, persistent=False)

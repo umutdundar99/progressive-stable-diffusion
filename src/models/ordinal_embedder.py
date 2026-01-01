@@ -130,16 +130,16 @@ class BasicOrdinalEmbedder(nn.Module):
     ) -> torch.Tensor:
         """
         Get negative conditioning embeddings with SMOOTH interpolation.
-        
+
         Per thesis Section 3.5:
         - Mayo 0 (normal mucosa) contrasts against Mayo 1 features
         - Mayo 1+ contrasts against Mayo 0 (healthy) features
-        
+
         To avoid discontinuity at intermediate values, we smoothly interpolate:
         - At label=0: negative_label = 1.0 (contrast against mild disease)
         - At label=1: negative_label = 0.0 (contrast against healthy)
         - At label>=1: negative_label = 0.0 (contrast against healthy)
-        
+
         This creates smooth CFG guidance across the severity spectrum.
 
         Args:
@@ -317,16 +317,16 @@ class AdditiveOrdinalEmbedder(nn.Module):
     ) -> torch.Tensor:
         """
         Get negative conditioning embeddings with SMOOTH interpolation.
-        
+
         Per thesis Section 3.5:
         - Mayo 0 (normal mucosa) contrasts against Mayo 1 features
         - Mayo 1+ contrasts against Mayo 0 (healthy) features
-        
+
         To avoid discontinuity at intermediate values, we smoothly interpolate:
         - At label=0: negative_label = 1.0 (contrast against mild disease)
         - At label=1: negative_label = 0.0 (contrast against healthy)
         - At label>=1: negative_label = 0.0 (contrast against healthy)
-        
+
         This creates smooth CFG guidance across the severity spectrum.
 
         Args:

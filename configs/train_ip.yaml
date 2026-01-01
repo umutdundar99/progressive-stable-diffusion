@@ -5,7 +5,7 @@ hydra:
   output_subdir: null
 
 model:
-  name: "ordinal_progressive_sd"
+  name: "ordinal_progressive_sd_ip"
   embedding_dim: 768
   conditioning_dim: 768
   base_channels: 320
@@ -16,6 +16,15 @@ model:
   use_pretrained_vae: true
   pretrained_vae_path: "CompVis/stable-diffusion-v1-4"
   pretrained_unet_path: "CompVis/stable-diffusion-v1-4"
+  image_encoder_path: "openai/clip-vit-large-patch14"
+  num_image_tokens: 16         # Increased from 4 to capture more details
+  image_scale: 1.0
+  use_frequency_strategy: true
+  use_image_projection_plus: false   # Use hidden states (Perceiver Resampler)
+  structure_method: "raw"      # Use raw images, not blur
+  # Blur parameters (deprecated - not used with raw images)
+  # blur_kernel_size: 7
+  # blur_sigma: 2.0
 
   ordinal_embedder:
     type: "aoe"
@@ -24,41 +33,42 @@ model:
     boe:
       weight: 1.0
     aoe:
-      delta_scale: 0.05  # Reduced from 0.15 for more stable embeddings
+      delta_scale: 0.05
 
 optimizer:
   name: "adamw"
-  lr: 1e-5
+  lr: 1e-4
   weight_decay: 0.001
   betas: [0.9, 0.999]
 
 scheduler:
   name: "cosine"
   warmup_epochs: 2
-  max_epochs: 75
+  max_epochs: 150
   min_lr: 1e-6
 
 dataset:
   dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data
   batch_size: 32
-  num_workers: 14
-  persistent_workers: true     # Keep workers alive between epochs (faster)
-  prefetch_factor: 2           # Number of batches to prefetch per worker
+  num_workers: 24
+  persistent_workers: true
+  prefetch_factor: 2
   image_size: 256
   num_classes: 4
   sampler: "class_balanced"
+  return_structure_images: true
   augmentation:
     flip: true
     rotation: 5
     center_crop: 224
-    color_jitter: True
+    color_jitter: false        # Disable for IP training (might interfere)
 
 training:
-  max_epochs: 100
+  max_epochs: 150
   log_every_n_steps: 50
   gradient_clip_val: 1.0
-  accumulate_grad_batches: 1
-  precision: "16-mixed"        # Use 16-mixed for better AMP support
+  accumulate_grad_batches: 2   # Effective batch = 32
+  precision: "16-mixed"
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
@@ -67,16 +77,16 @@ training:
   update_starting_at_step: 100
   update_every_n_steps: 4
   use_min_snr_weighting: true
-  use_compile: False           # torch.compile (PyTorch 2.0+) - set true for ~20% speedup
-  compile_mode: "reduce-overhead"  # Options: "default", "reduce-overhead", "max-autotune"
-  gradient_checkpointing: false    # Trade compute for memory - enables larger batch sizes
-  noise_offset: 0.0            # Improves contrast in generated images (0.0 to disable)
-  input_perturbation: 0.1      # Perturb input noise for better training (0.0-0.1)
-
+  use_compile: false
+  compile_mode: "reduce-overhead"
+  gradient_checkpointing: true # Enable for memory (IP-Adapter uses more)
+  noise_offset: 0.0
+  input_perturbation: 0.0
+  image_conditioning_weight: 0.01  # Regularization to encourage image usage
 
 wandb:
-  project: "prog-disease-generation"
-  run_name: "ordinal-aware-diffusion"
+  project: "prog-disease-generation-ip"
+  run_name: "ordinal-ip-adapter"
   log_samples_every_n_steps: 50
   offline: True
 
@@ -86,7 +96,6 @@ diffusion:
   beta_end: 0.012
   num_train_timesteps: 1000
   sampling_steps: 50
-  guidance_scale: 2.0
+  guidance_scale: 1.0
   min_snr_gamma: 1.0
   ema_update_interval: 1
-  nodal_scale: 1.0

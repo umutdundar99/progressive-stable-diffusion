@@ -13,13 +13,13 @@ fi
 
 CKPT_BASE_PATH="/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation/c8o3zs2i/checkpoints"
 
-for i in $(seq 19 10 99); do
+for i in $(seq 89 10 99); do
 
     CKPT_NUM_FORMATTED=$(printf "%04d" $i)
 
     CKPT_FILE="${CKPT_BASE_PATH}/ddpm-epochepoch=${CKPT_NUM_FORMATTED}.ckpt"
 
-    OUTPUT_DIR="outputs/inference_run_${SEED}_${i}"
+    OUTPUT_DIR="outputs2/inference_run_${SEED}_${i}"
 
     echo "----------------------------------------------------------------"
     echo "Starting Process -> Seed: $SEED | Checkpoint: $i"
