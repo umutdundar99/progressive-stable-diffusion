@@ -45,6 +45,8 @@ class OrdinalIPAttnProcessor(nn.Module):
             - "image_dominant": Image has higher weight (for high-res layers)
         aoe_scale: Scale factor for AOE attention output
         image_scale: Scale factor for Image attention output
+        frequency_dominant_scale: Multiplier for dominant modality (default 1.5)
+        frequency_non_dominant_scale: Multiplier for non-dominant modality (default 0.5)
     """
 
     def __init__(
@@ -56,6 +58,8 @@ class OrdinalIPAttnProcessor(nn.Module):
         frequency_mode: Literal["both", "aoe_dominant", "image_dominant"] = "both",
         aoe_scale: float = 1.0,
         image_scale: float = 1.0,
+        frequency_dominant_scale: float = 1.5,
+        frequency_non_dominant_scale: float = 0.5,
     ) -> None:
         super().__init__()
 
@@ -65,13 +69,13 @@ class OrdinalIPAttnProcessor(nn.Module):
         self.num_tokens = num_tokens
         self.frequency_mode = frequency_mode
 
-        # Set scales based on frequency mode
+        # Set scales based on frequency mode (configurable via parameters)
         if frequency_mode == "aoe_dominant":
-            self.aoe_scale = aoe_scale * 1.5
-            self.image_scale = image_scale * 0.5
+            self.aoe_scale = aoe_scale * frequency_dominant_scale
+            self.image_scale = image_scale * frequency_non_dominant_scale
         elif frequency_mode == "image_dominant":
-            self.aoe_scale = aoe_scale * 0.5
-            self.image_scale = image_scale * 1.5
+            self.aoe_scale = aoe_scale * frequency_non_dominant_scale
+            self.image_scale = image_scale * frequency_dominant_scale
         else:  # both
             self.aoe_scale = aoe_scale
             self.image_scale = image_scale
@@ -250,6 +254,8 @@ class OrdinalIPAttnProcessor2_0(nn.Module):
         frequency_mode: Literal["both", "aoe_dominant", "image_dominant"] = "both",
         aoe_scale: float = 1.0,
         image_scale: float = 1.0,
+        frequency_dominant_scale: float = 1.5,
+        frequency_non_dominant_scale: float = 0.5,
     ) -> None:
         super().__init__()
 
@@ -265,13 +271,13 @@ class OrdinalIPAttnProcessor2_0(nn.Module):
         self.num_tokens = num_tokens
         self.frequency_mode = frequency_mode
 
-        # Set scales based on frequency mode
+        # Set scales based on frequency mode (configurable via parameters)
         if frequency_mode == "aoe_dominant":
-            self.aoe_scale = aoe_scale * 1.5
-            self.image_scale = image_scale * 0.5
+            self.aoe_scale = aoe_scale * frequency_dominant_scale
+            self.image_scale = image_scale * frequency_non_dominant_scale
         elif frequency_mode == "image_dominant":
-            self.aoe_scale = aoe_scale * 0.5
-            self.image_scale = image_scale * 1.5
+            self.aoe_scale = aoe_scale * frequency_non_dominant_scale
+            self.image_scale = image_scale * frequency_dominant_scale
         else:
             self.aoe_scale = aoe_scale
             self.image_scale = image_scale
@@ -460,6 +466,8 @@ def set_ordinal_ip_attention_processors(
     num_tokens: int = 16,
     scale: float = 1.0,
     use_frequency_strategy: bool = True,
+    frequency_dominant_scale: float = 1.5,
+    frequency_non_dominant_scale: float = 0.5,
 ) -> dict:
     """
     Replace UNet attention processors with OrdinalIPAttnProcessor.
@@ -469,6 +477,8 @@ def set_ordinal_ip_attention_processors(
         num_tokens: Number of image tokens from ImageProjection
         scale: Global scale for image conditioning
         use_frequency_strategy: Whether to use frequency-based attention weighting
+        frequency_dominant_scale: Scale multiplier for dominant modality (default 1.5)
+        frequency_non_dominant_scale: Scale multiplier for non-dominant modality (default 0.5)
 
     Returns:
         Dictionary of processor names to processors
@@ -525,12 +535,12 @@ def set_ordinal_ip_attention_processors(
                 scale=scale,
                 num_tokens=num_tokens,
                 frequency_mode=frequency_mode,
+                frequency_dominant_scale=frequency_dominant_scale,
+                frequency_non_dominant_scale=frequency_non_dominant_scale,
             )
             processor.load_state_dict(weights, strict=False)
 
             attn_procs[name] = processor
-
-            print(f"  {name}: {frequency_mode} (hidden={hidden_size})")
 
     # Set all processors at once
     unet.set_attn_processor(attn_procs)

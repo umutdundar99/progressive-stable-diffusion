@@ -211,3 +211,4 @@ data
 prog-*
 outputs*
 markdowns
+ignore_scripts

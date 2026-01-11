@@ -207,8 +207,6 @@ class AdditiveOrdinalEmbedder(nn.Module):
         self.base = nn.Parameter(torch.zeros(embedding_dim))
         nn.init.normal_(self.base, mean=0.0, std=init_std)
 
-        # Deltas between ordinals - initialized with MONOTONICALLY INCREASING pattern
-        # This ensures E[k] = base + sum(deltas[:k]) naturally increases
         self.deltas = nn.Parameter(torch.empty(num_classes - 1, embedding_dim))
         self._initialize_monotonic_deltas(init_std, delta_scale)
 
@@ -228,12 +226,8 @@ class AdditiveOrdinalEmbedder(nn.Module):
         - Small variance to allow learning while maintaining ordinal structure
         """
         with torch.no_grad():
-            # Initialize with small positive bias to encourage monotonic increase
-            # Each delta adds "new pathological features" on top of previous
             for i in range(self.num_classes - 1):
-                # Positive mean ensures cumulative sum increases
                 nn.init.normal_(self.deltas[i], mean=delta_scale, std=init_std)
-                # Scale by severity level to emphasize progression
                 self.deltas[i] *= 1.0 + 0.1 * i
 
     def _compute_class_table(self) -> torch.Tensor:
@@ -243,7 +237,7 @@ class AdditiveOrdinalEmbedder(nn.Module):
             E[0], E[1], ..., E[K-1]
         where E[k] = base + sum(deltas[:k])
         """
-        cumulative = torch.cumsum(self.deltas, dim=0)  # (K-1, D)
+        cumulative = torch.cumsum(self.deltas, dim=0)
         offsets = torch.cat(
             [
                 torch.zeros(
@@ -261,9 +255,9 @@ class AdditiveOrdinalEmbedder(nn.Module):
     def forward(
         self,
         labels: torch.Tensor,
-        is_training: bool = False,  # Default False for safety during inference
+        is_training: bool = False,
         unconditional: bool = False,
-        noise_std: float = 0.005,  # Reduced from 0.01 for more stable training
+        noise_std: float = 0.005,
     ) -> torch.Tensor:
         """
         Args:
@@ -313,7 +307,7 @@ class AdditiveOrdinalEmbedder(nn.Module):
         self,
         labels: torch.Tensor,
         is_training: bool = False,
-        noise_std: float = 0.005,  # Reduced from 0.01 for more stable training
+        noise_std: float = 0.005,
     ) -> torch.Tensor:
         """
         Get negative conditioning embeddings with SMOOTH interpolation.

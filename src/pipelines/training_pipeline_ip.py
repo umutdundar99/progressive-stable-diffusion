@@ -34,7 +34,7 @@ def main(cfg: DictConfig) -> None:
     wandb_logger = WandbLogger(
         project=cfg.wandb.project,
         name=cfg.wandb.run_name,
-        log_model="all" if not cfg.wandb.offline else False,
+        log_model=False,
         offline=cfg.wandb.offline,
     )
 

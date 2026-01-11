@@ -11,27 +11,26 @@ model:
   base_channels: 320
   num_res_blocks: [2, 2, 2, 2]
   attention_heads: 8
-  dropout: 0.1
+  cfg_drop_prob: 0.1
   latent_channels: 4
   use_pretrained_vae: true
   pretrained_vae_path: "CompVis/stable-diffusion-v1-4"
   pretrained_unet_path: "CompVis/stable-diffusion-v1-4"
   image_encoder_path: "openai/clip-vit-large-patch14"
-  num_image_tokens: 16         # Increased from 4 to capture more details
+  num_image_tokens: 16
   image_scale: 1.0
   use_frequency_strategy: true
-  use_image_projection_plus: false   # Use hidden states (Perceiver Resampler)
-  structure_method: "raw"      # Use raw images, not blur
-  # Blur parameters (deprecated - not used with raw images)
-  # blur_kernel_size: 7
-  # blur_sigma: 2.0
+  use_image_projection_plus: true
+  blur_kernel_size: 11
+  blur_sigma: 15.0
+
+  frequency_dominant_scale: 1.5
+  frequency_non_dominant_scale: 0.5
 
   ordinal_embedder:
     type: "aoe"
     num_classes: 4
     interpolation_steps: 101
-    boe:
-      weight: 1.0
     aoe:
       delta_scale: 0.05
 
@@ -50,7 +49,7 @@ scheduler:
 dataset:
   dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data
   batch_size: 32
-  num_workers: 24
+  num_workers: 1
   persistent_workers: true
   prefetch_factor: 2
   image_size: 256
@@ -61,13 +60,15 @@ dataset:
     flip: true
     rotation: 5
     center_crop: 224
-    color_jitter: false        # Disable for IP training (might interfere)
+    color_jitter: True
+    perspective: 0.2
+
 
 training:
   max_epochs: 150
   log_every_n_steps: 50
   gradient_clip_val: 1.0
-  accumulate_grad_batches: 2   # Effective batch = 32
+  accumulate_grad_batches: 2
   precision: "16-mixed"
   accelerator: "gpu"
   devices: 1
@@ -79,14 +80,13 @@ training:
   use_min_snr_weighting: true
   use_compile: false
   compile_mode: "reduce-overhead"
-  gradient_checkpointing: true # Enable for memory (IP-Adapter uses more)
-  noise_offset: 0.0
-  input_perturbation: 0.0
-  image_conditioning_weight: 0.01  # Regularization to encourage image usage
+  gradient_checkpointing: true
+  noise_offset: 0.1
+
 
 wandb:
   project: "prog-disease-generation-ip"
-  run_name: "ordinal-ip-adapter"
+  run_name: "dominant_15_nondominant_05_aoe_blur9_sigma2_ip"
   log_samples_every_n_steps: 50
   offline: True
 

@@ -25,7 +25,7 @@ from .attention_processor import (
     set_ordinal_ip_attention_processors,
 )
 from .image_encoder import ImageEncoder, ImageProjection, ImageProjectionPlus
-from .ordinal_embedder import AdditiveOrdinalEmbedder, BasicOrdinalEmbedder
+from .ordinal_embedder import AdditiveOrdinalEmbedder
 from .unet import OrdinalUNet, UNetConfig
 from .vae import SDVAE
 
@@ -45,7 +45,6 @@ class DiffusionIPConfig:
     latent_scale: float = 0.18215
     noise_offset: float = 0.0
     input_perturbation: float = 0.0
-    # IP-Adapter specific
     image_encoder_path: str = "openai/clip-vit-base-patch16"
     num_image_tokens: int = 4
     image_scale: float = 1.0
@@ -129,19 +128,12 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
         # ORDINAL EMBEDDER (TRAINABLE)
         emb_cfg = cfg.model.ordinal_embedder
-        if emb_cfg.type.lower() == "boe":
-            self.ordinal_embedder = BasicOrdinalEmbedder(
-                num_classes=emb_cfg.num_classes,
-                embedding_dim=cfg.model.embedding_dim,
-            )
-        elif emb_cfg.type.lower() == "aoe":
-            self.ordinal_embedder = AdditiveOrdinalEmbedder(
-                num_classes=emb_cfg.num_classes,
-                embedding_dim=cfg.model.embedding_dim,
-                delta_scale=getattr(emb_cfg.aoe, "delta_scale", 0.1),
-            )
-        else:
-            raise ValueError(f"Unknown ordinal embedder type: {emb_cfg.type}")
+
+        self.ordinal_embedder = AdditiveOrdinalEmbedder(
+            num_classes=emb_cfg.num_classes,
+            embedding_dim=cfg.model.embedding_dim,
+            delta_scale=getattr(emb_cfg.aoe, "delta_scale", 0.1),
+        )
 
         # UNET (TRAINABLE)
         unet_config = UNetConfig(
@@ -165,6 +157,9 @@ class DiffusionModuleWithIP(pl.LightningModule):
             "alphas_cumprod_prev", alphas_cumprod_prev, persistent=False
         )
 
+        self.blur_kernel_size = cfg.model["blur_kernel_size"]
+        self.blur_sigma = cfg.model["blur_sigma"]
+
         # For Min-SNR computation
         snr_values = alphas_cumprod / (1.0 - alphas_cumprod + 1e-8)
         self.register_buffer("snr_values", snr_values, persistent=False)
@@ -182,11 +177,16 @@ class DiffusionModuleWithIP(pl.LightningModule):
         # Access the underlying diffusers UNet
         unet = self.unet.unet
 
+        frequency_dominant_scale = self.cfg.model["frequency_dominant_scale"]
+        frequency_non_dominant_scale = self.cfg.model["frequency_non_dominant_scale"]
+
         set_ordinal_ip_attention_processors(
             unet=unet,
             num_tokens=self.diff_cfg.num_image_tokens,
             scale=self.diff_cfg.image_scale,
             use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
+            frequency_dominant_scale=frequency_dominant_scale,
+            frequency_non_dominant_scale=frequency_non_dominant_scale,
         )
 
     def _print_trainable_params(self) -> None:
@@ -264,7 +264,8 @@ class DiffusionModuleWithIP(pl.LightningModule):
         Extract and project image embeddings for anatomical conditioning.
 
         Args:
-            structure_images: Blurred/depth images (B, 3, H, W) in [-1, 1]
+            structure_images: CLIP-preprocessed images (B, 3, 224, 224)
+                              Already ImageNet-normalized by CLIPImageProcessor
 
         Returns:
             Projected embeddings (B, num_tokens, cross_attention_dim)
@@ -283,7 +284,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
         labels: Tensor,
         structure_images: Tensor,
         is_training: bool = True,
-    ) -> Tensor:
+    ) -> Tuple[Tensor, Tensor]:
         """
         Prepare combined conditioning: AOE + Image embeddings.
 
@@ -295,19 +296,14 @@ class DiffusionModuleWithIP(pl.LightningModule):
         Returns:
             Combined embeddings (B, aoe_tokens + image_tokens, D)
         """
-        # Get AOE embeddings (B, D) -> (B, 1, D)
+
         aoe_embeds = self.ordinal_embedder(labels, is_training=is_training)
         if aoe_embeds.dim() == 2:
-            aoe_embeds = aoe_embeds.unsqueeze(1)  # (B, 1, D)
+            aoe_embeds = aoe_embeds.unsqueeze(1)
 
-        # Get Image embeddings (B, num_tokens, D)
         image_embeds = self._get_image_embeds(structure_images)
 
-        # Concatenate: [AOE, Image]
-        # Shape: (B, 1 + num_tokens, D)
-        combined = torch.cat([aoe_embeds, image_embeds], dim=1)
-
-        return combined
+        return aoe_embeds, image_embeds
 
     def forward(
         self,
@@ -322,26 +318,28 @@ class DiffusionModuleWithIP(pl.LightningModule):
         """
         Training step with dual conditioning.
 
+        Following Meryem's methodology (Section 3.5):
+        - AOE conditioning is ALWAYS provided (no CFG dropout for ordinal embeddings)
+        - Image conditioning has CFG dropout (per-sample, not per-batch)
+
         Expects batch to contain:
         - images: Original endoscopy images (B, 3, H, W)
         - labels: Mayo scores (B,)
-        - structure_images: Blurred/depth versions (B, 3, H, W)
+        - structure_images: CLIP-preprocessed structure images (B, 3, 224, 224)
         """
-        # Unpack batch
-        if len(batch) == 3:
-            images, labels, structure_images = batch
-        else:
-            # Fallback: Generate structure images on-the-fly
-            images, labels = batch
-            structure_images = self._apply_structure_transform(images)
 
+        images, labels, structure_images = batch
+        batch_size = images.shape[0]
+
+        # Encode to latent space
         vae_output = self.vae.encode(images)
         latents = vae_output.latent_dist.sample() * self.diff_cfg.latent_scale
 
+        # Sample noise
         noise = torch.randn_like(latents)
         if self.diff_cfg.noise_offset > 0:
             noise_offset = self.diff_cfg.noise_offset * torch.randn(
-                latents.shape[0],
+                batch_size,
                 latents.shape[1],
                 1,
                 1,
@@ -350,68 +348,39 @@ class DiffusionModuleWithIP(pl.LightningModule):
             )
             noise = noise + noise_offset
 
-        t = self._sample_timesteps(latents.shape[0])
-
+        # Sample timesteps and add noise
+        t = self._sample_timesteps(batch_size)
         noisy_latents = self._q_sample(latents, t, noise)
 
-        # Prepare dual conditioning
-        cond_embed = self._prepare_conditioning(
+        # Get AOE embeddings
+        aoe_embeds, image_embeds = self._prepare_conditioning(
             labels, structure_images, is_training=True
         )
 
-        # DUAL CONDITIONING
-        uncond_embed = self._prepare_conditioning(
-            labels, torch.zeros_like(structure_images), is_training=True
-        )
+        cfg_drop_prob = getattr(self.cfg.model, "cfg_drop_prob", 0.1)
+        drop_mask = torch.rand(batch_size, device=self.device) < cfg_drop_prob
+        zero_image_embeds = torch.zeros_like(image_embeds)
 
-        # Predict noise with full conditioning
-        noise_pred = self.unet(noisy_latents, t, cond_embed)
+        drop_mask_expanded = drop_mask.view(-1, 1, 1).expand_as(image_embeds)
+        image_embeds = torch.where(drop_mask_expanded, zero_image_embeds, image_embeds)
+        combined_embeds = torch.cat([aoe_embeds, image_embeds], dim=1)
 
-        # Compute main loss
+        noise_pred = self.unet(noisy_latents, t, combined_embeds)
+
         base_loss = F.mse_loss(noise_pred, noise, reduction="none")
         base_loss = base_loss.mean(dim=(1, 2, 3))
-
-        # Apply Min-SNR weighting
         weight = self._min_snr_weight(t)
         loss = (weight * base_loss).mean()
 
-        noise_pred_uncond = self.unet(noisy_latents, t, uncond_embed)
-
-        conditioning_difference = F.mse_loss(
-            noise_pred, noise_pred_uncond, reduction="mean"
-        )
-
-        if conditioning_difference > 0.0:
-            cond_reg_weight = getattr(
-                self.cfg.training, "image_conditioning_weight", 0.01
-            )
-            loss = loss + cond_reg_weight * conditioning_difference
-
-        # Logging
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log(
-            "train/cond_diff", conditioning_difference, on_step=False, on_epoch=True
+            "train/cfg_drop_rate",
+            drop_mask.float().mean(),
+            on_step=False,
+            on_epoch=True,
         )
 
         return loss
-
-    def _apply_structure_transform(self, images: Tensor) -> Tensor:
-        """
-        Return original images without blur for better anatomical conditioning.
-
-        The CLIP encoder extracts structural features from raw images,
-        which is more effective than blurred versions for maintaining
-        anatomical consistency.
-
-        Args:
-            images: Original images (B, C, H, W) in [-1, 1]
-
-        Returns:
-            Original images (B, C, H, W) in [-1, 1]
-        """
-        # Return raw images - no blur needed with CLIP + ImageProjectionPlus
-        # CLIP's ViT-Large already extracts structural features effectively
-        return images
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configure optimizer with separate learning rates."""
@@ -419,12 +388,9 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
         # Group parameters with different learning rates
         params = [
-            # UNet parameters (main learning rate)
             {"params": self.unet.parameters(), "lr": opt_cfg.lr},
-            # Ordinal embedder (same as UNet)
             {"params": self.ordinal_embedder.parameters(), "lr": opt_cfg.lr},
-            # Image projection (can use higher LR since smaller)
-            {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 2},
+            {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 10},
         ]
 
         optimizer = torch.optim.AdamW(

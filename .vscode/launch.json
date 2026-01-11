@@ -26,13 +26,34 @@
       "--config", "configs/train_ip.yaml",
       "--sampling-steps", "50",
       "--mes-steps", "20",
-      "--output-dir", "outputs2/inferece_ip_blur_second_try_3_3levelimg_imgscale1",
+      "--output-dir", "outputs2/inferece_ip_blur_second_try_3_3levelimg_imgscale1_invert",
       // "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/0/UC_patient_40_7.bmp",
       //"--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/1/UC_patient_448_54.bmp",
       "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_239_112.bmp",
       //"--no-blur",
       "--image-scale", "1",
       "--guidance-scale", "1.0"
+      ]
+    },
+    {
+      "name": "Inference Diffusion Inverted",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/inference_pipeline.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation/c8o3zs2i/checkpoints/ddpm-epochepoch=0099.ckpt",
+      "--config", "configs/train.yaml",
+      "--sampling-steps", "50",
+      "--mes-steps", "20",
+      "--output-dir", "outputs_inverted/c8o3zs2i_test_3_UC_patient_199_47",
+      //"--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_239_112.bmp",
+      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_199_47.bmp",
+      "--guidance-scale", "1.0",
+      "--use-ddim-invert"
       ]
     }
   ]
