@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,6 +29,15 @@ from torch import Tensor
 from torchvision import transforms
 
 from src.models.diffusion_module_ip import DiffusionModuleWithIP
+
+# Optional wandb import
+try:
+    import wandb
+
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+    print("Warning: wandb not installed. Install with: pip install wandb")
 
 
 def convert_to_serializable(obj: Any) -> Any:
@@ -216,6 +225,23 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Quick test mode with fewer samples and guidance scales.",
     )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="ip-adapter-evaluation",
+        help="WandB project name.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="WandB run name. If not provided, auto-generated.",
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable wandb logging.",
+    )
     return parser.parse_args()
 
 
@@ -279,9 +305,16 @@ def load_real_images_for_class(
     data_dir: Path,
     class_idx: int,
     image_size: int,
-    max_images: int = 1000,
+    max_images: Optional[int] = None,
 ) -> Tensor:
-    """Load real images for a specific class."""
+    """Load real images for a specific class.
+
+    Args:
+        data_dir: Root directory containing class subdirectories
+        class_idx: Class index (0-3 for MES scores)
+        image_size: Target image size for resizing
+        max_images: Maximum images to load. If None, load all available images.
+    """
     class_dir = data_dir / str(class_idx)
     if not class_dir.exists():
         raise FileNotFoundError(f"Class directory not found: {class_dir}")
@@ -297,7 +330,10 @@ def load_real_images_for_class(
     extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]
 
     for img_path in sorted(class_dir.iterdir()):
-        if img_path.suffix.lower() in extensions and len(images) < max_images:
+        if img_path.suffix.lower() in extensions:
+            # If max_images is set, respect the limit
+            if max_images is not None and len(images) >= max_images:
+                break
             try:
                 img = Image.open(img_path).convert("RGB")
                 img_tensor = transform(img)
@@ -732,21 +768,35 @@ def load_all_real_images(
     data_dir: Path,
     num_classes: int,
     image_size: int,
-    max_per_class: int = 500,
+    max_per_class: Optional[int] = None,
 ) -> Dict[int, Tensor]:
-    """Load real images for all classes."""
+    """Load real images for all classes.
+
+    Args:
+        data_dir: Root directory containing class subdirectories
+        num_classes: Number of classes to load
+        image_size: Target image size for resizing
+        max_per_class: Maximum images per class. If None, load all available images.
+
+    Returns:
+        Dictionary mapping class index to tensor of images
+    """
     real_images = {}
+    total_images = 0
     for class_idx in range(num_classes):
         try:
             real_images[class_idx] = load_real_images_for_class(
                 data_dir, class_idx, image_size, max_per_class
             )
+            num_loaded = len(real_images[class_idx])
+            total_images += num_loaded
             print(
-                f"  Loaded {len(real_images[class_idx])} real images for class {class_idx}"
+                f"  Loaded {num_loaded} real images for class {class_idx}"
             )
         except Exception as e:
             print(f"  Warning: Could not load class {class_idx}: {e}")
             real_images[class_idx] = None
+    print(f"  Total real images loaded: {total_images}")
     return real_images
 
 
@@ -812,6 +862,97 @@ def print_comparison_summary(df: pd.DataFrame) -> None:
     print("=" * 80)
 
 
+def init_wandb(
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> Optional[Any]:
+    """Initialize WandB logging if available and enabled."""
+    if args.no_wandb or not HAS_WANDB:
+        if not HAS_WANDB:
+            print("WandB not available, skipping logging.")
+        else:
+            print("WandB logging disabled by --no-wandb flag.")
+        return None
+
+    run_name = args.wandb_run_name
+    if run_name is None:
+        run_name = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    wandb_run = wandb.init(
+        project=args.wandb_project,
+        name=run_name,
+        config={
+            "guidance_scales": args.guidance_scales,
+            "num_samples_per_class": args.num_samples_per_class,
+            "sampling_steps": args.sampling_steps,
+            "batch_size": args.batch_size,
+            "num_classes": args.num_classes,
+            "seed": args.seed,
+            "checkpoint1": str(args.checkpoint1),
+            "checkpoint2": str(args.checkpoint2),
+            "checkpoint3": str(args.checkpoint3),
+            "model_names": [args.name1, args.name2, args.name3],
+        },
+        dir=str(output_dir),
+    )
+    print(f"WandB run initialized: {wandb_run.url}")
+    return wandb_run
+
+
+def log_results_to_wandb(
+    results: Dict[str, Any],
+    wandb_run: Optional[Any],
+) -> None:
+    """Log evaluation results to WandB."""
+    if wandb_run is None:
+        return
+
+    model_name = results["model_name"]
+    guidance_scale = results["guidance_scale"]
+
+    # Log overall metrics
+    metrics = {
+        f"{model_name}/guidance_{guidance_scale}/fid": results.get("overall_fid", -1),
+        f"{model_name}/guidance_{guidance_scale}/is_mean": results.get("overall_is_mean", -1),
+        f"{model_name}/guidance_{guidance_scale}/is_std": results.get("overall_is_std", -1),
+        f"{model_name}/guidance_{guidance_scale}/lpips_diversity": results.get("overall_lpips_diversity", -1),
+        f"{model_name}/guidance_{guidance_scale}/ssim": results.get("overall_ssim", -1),
+    }
+
+    # Log per-class metrics
+    for class_idx, class_metrics in results.get("per_class", {}).items():
+        metrics[f"{model_name}/guidance_{guidance_scale}/fid_class_{class_idx}"] = class_metrics.get("fid", -1)
+        metrics[f"{model_name}/guidance_{guidance_scale}/ssim_class_{class_idx}"] = class_metrics.get("ssim", -1)
+
+    wandb.log(metrics)
+
+
+def log_final_summary_to_wandb(
+    df: pd.DataFrame,
+    wandb_run: Optional[Any],
+    output_dir: Path,
+) -> None:
+    """Log final summary table and artifacts to WandB."""
+    if wandb_run is None:
+        return
+
+    # Log the comparison table
+    wandb.log({"comparison_table": wandb.Table(dataframe=df)})
+
+    # Find and log best results
+    best_overall = df.loc[df["FID"].idxmin()]
+    wandb.run.summary["best_model"] = best_overall["Model"]
+    wandb.run.summary["best_guidance"] = best_overall["Guidance"]
+    wandb.run.summary["best_fid"] = best_overall["FID"]
+    wandb.run.summary["best_is_mean"] = best_overall["IS Mean"]
+    wandb.run.summary["best_lpips_div"] = best_overall["LPIPS Div"]
+
+    # Log artifacts
+    artifact = wandb.Artifact("evaluation_results", type="results")
+    artifact.add_dir(str(output_dir))
+    wandb_run.log_artifact(artifact)
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -833,18 +974,32 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
+    # Initialize WandB
+    wandb_run = init_wandb(args, output_dir)
+
     # Load config
     cfg = _load_config(args.config)
     image_size = cfg.dataset.image_size
 
-    # Load real images
-    print("\nLoading real images...")
+    # Load ALL real images from test set (no max limit)
+    print("\nLoading all real images from test set...")
     real_images_by_class = load_all_real_images(
         args.real_data_dir,
         args.num_classes,
         image_size,
-        max_per_class=args.num_samples_per_class * 2,
+        max_per_class=None,  # Load all available test images
     )
+
+    # Log real image counts to wandb
+    if wandb_run is not None:
+        real_image_counts = {
+            f"real_images/class_{k}": len(v) if v is not None else 0
+            for k, v in real_images_by_class.items()
+        }
+        real_image_counts["real_images/total"] = sum(
+            len(v) for v in real_images_by_class.values() if v is not None
+        )
+        wandb.log(real_image_counts)
 
     # Models to evaluate with their specific frequency scales
     # Model configs:
@@ -904,6 +1059,9 @@ def main() -> None:
             print(f"    Overall FID: {results.get('overall_fid', -1):.2f}")
             print(f"    Overall IS: {results.get('overall_is_mean', -1):.2f}")
 
+            # Log to WandB
+            log_results_to_wandb(results, wandb_run)
+
         # Free memory
         del module
         torch.cuda.empty_cache()
@@ -922,11 +1080,19 @@ def main() -> None:
     # Print summary
     print_comparison_summary(df)
 
+    # Log final summary to WandB
+    log_final_summary_to_wandb(df, wandb_run, output_dir)
+
     # Save args
     args_dict = vars(args)
     args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in args_dict.items()}
     with open(output_dir / "args.json", "w") as f:
         json.dump(args_dict, f, indent=2)
+
+    # Close WandB
+    if wandb_run is not None:
+        wandb.finish()
+        print("\nWandB run finished.")
 
 
 if __name__ == "__main__":
