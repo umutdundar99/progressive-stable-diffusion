@@ -8,15 +8,18 @@ patient-specific anatomical structure via image conditioning.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch import Tensor
 from torchvision import transforms
+from tqdm import tqdm
 from transformers import CLIPImageProcessor
 
 from src.models.diffusion_module_ip import DiffusionModuleWithIP
@@ -38,18 +41,7 @@ def _parse_args() -> argparse.Namespace:
         default=Path("configs/train_ip.yaml"),
         help="Hydra-compatible config file for IP-Adapter training setup.",
     )
-    parser.add_argument(
-        "--structure-image",
-        type=Path,
-        required=True,
-        help="Reference image for anatomical structure (will be blurred/processed).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("outputs/inference_ip"),
-        help="Directory where generated progression images are saved.",
-    )
+
     parser.add_argument(
         "--mes-steps",
         type=int,
@@ -71,8 +63,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,  # None = random seed each run
-        help="Random seed for sampling. If not set, uses random seed for variety.",
+        default=42,
+        help="Random seed used for sampling.",
     )
     parser.add_argument(
         "--guidance-scale",
@@ -95,16 +87,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-blur",
         action="store_true",
-        default=False,  # Changed: use raw images by default (no blur)
+        default=True,  # Changed: use raw images by default (no blur)
         help="Skip blurring the structure image (use raw image features).",
     )
     parser.add_argument(
-        "--zero-image",
-        action="store_true",
-        default=False,
-        help="Use zero image conditioning (c_img=0). Only AOE ordinal conditioning active. "
-        "This is useful for testing progression without patient-specific features.",
+        "--data-root",
+        type=Path,
+        default=Path("data/limuc/processed_data"),
+        help="Root directory for the LIMUC dataset.",
     )
+
     return parser.parse_args()
 
 
@@ -128,17 +120,43 @@ def _load_config(config_path: Path) -> DictConfig:
 
 
 def _build_labels(
-    num_steps: int,
-    start: float = 0.0,
-    end: float = 3.0,
-    device: torch.device | None = None,
-) -> Tensor:
-    device = device or torch.device("cpu")
-    if num_steps <= 0:
-        raise ValueError("`mes_steps` must be a positive integer.")
-    return torch.linspace(
-        start, end, steps=num_steps, device=device, dtype=torch.float32
-    )
+    data_root: Path,
+    patient_id: str,
+    image_id: str,
+) -> pd.DataFrame:
+    """
+    Find the original image and its MES score for a given patient/image.
+
+    Returns:
+        DataFrame with columns: patient_num, image_path, mes_score
+        Should contain exactly one row if the image exists.
+    """
+    df = pd.DataFrame(columns=["patient_num", "image_path", "mes_score"])
+
+    # Exact filename to search for
+    expected_filename = f"UC_patient_{patient_id}_{image_id}.bmp"
+
+    for mes_score in range(4):
+        mes_path = os.path.join(data_root, "train", str(mes_score))
+        if not os.path.exists(mes_path):
+            continue
+
+        # Check for exact filename match
+        image_path = os.path.join(mes_path, expected_filename)
+        if os.path.exists(image_path):
+            df = pd.concat(
+                [
+                    df,
+                    pd.DataFrame(
+                        [[patient_id, image_path, mes_score]], columns=df.columns
+                    ),
+                ],
+                ignore_index=True,
+            )
+            # Found the image, no need to continue searching
+            break
+
+    return df
 
 
 def _load_and_preprocess_structure_image(
@@ -429,25 +447,17 @@ def _save_sequence(
     images: Tensor,
     labels: Tensor,
     output_dir: Path,
-    structure_image: Optional[Tensor] = None,
+    patient_id: str,
+    image_id: str,
 ) -> None:
     """Save generated progression images."""
     output_dir.mkdir(parents=True, exist_ok=True)
     images = images.cpu()
-
-    # Save structure reference if provided
-    if structure_image is not None:
-        struct_array = (
-            structure_image.permute(1, 2, 0).mul(255).to(torch.uint8)
-        ).numpy()
-        struct_pil = Image.fromarray(struct_array)
-        struct_pil.save(output_dir / "structure_reference.png")
-
-    # Save progression images
-    for idx, (image, label) in enumerate(zip(images, labels)):
+    for _, (image, label) in enumerate(zip(images, labels)):
         array = (image.permute(1, 2, 0).mul(255).to(torch.uint8)).numpy()
         pil_image = Image.fromarray(array)
-        filename = output_dir / f"mes_{label.item():.2f}_{idx:02d}.png"
+        new_image_name = f"UC_patient_{patient_id}_{image_id}_augmented.png"
+        filename = os.path.join(output_dir, "train", str(label.item()), new_image_name)
         pil_image.save(filename)
 
 
@@ -512,21 +522,10 @@ def _create_progression_grid(
 def main() -> None:
     args = _parse_args()
     device = _resolve_device(args.device)
-
-    # Handle seed: if None, generate random seed for variety
-    if args.seed is None:
-        import time
-
-        seed = int(time.time() * 1000) % (2**32)
-        print(f"🎲 Using random seed: {seed}")
-    else:
-        seed = args.seed
-        print(f"🎲 Using fixed seed: {seed}")
-    _set_seed(seed)
+    _set_seed(args.seed)
 
     print(f"🔧 Device: {device}")
     print(f"📁 Checkpoint: {args.checkpoint}")
-    print(f"🖼️  Structure image: {args.structure_image}")
     print(f"Applying blur to structure image: {not args.no_blur}")
 
     # Load config
@@ -545,61 +544,85 @@ def main() -> None:
     # Load and preprocess structure image
     print("🖼️  Processing structure image...")
     blur_config = cfg.model
-    structure_tensor, display_tensor = _load_and_preprocess_structure_image(
-        args.structure_image,
-        target_size=cfg.dataset.image_size,
-        device=device,
-        apply_blur=not args.no_blur,
-        blur_kernel_size=getattr(blur_config, "blur_kernel_size", 15),
-        blur_sigma=getattr(blur_config, "blur_sigma", 5.0),
-    )
 
-    # Build MES labels (num_classes=4 means MES scores 0-3)
-    labels = _build_labels(
-        args.mes_steps,
-        start=0.0,
-        end=float(cfg.dataset.num_classes - 1),
-        device=device,
-    )
+    patients_csv = args.data_root / "patient_splits.csv"
+    if not patients_csv.exists():
+        raise FileNotFoundError(f"Patient splits CSV not found at {patients_csv}")
 
-    print(
-        f"🎯 Generating {len(labels)} images with MES from {labels[0]:.2f} to {labels[-1]:.2f}"
-    )
-    print(f"   Guidance scale: {args.guidance_scale}")
-    print(f"   Image scale: {args.image_scale}")
-    print(f"   Sampling steps: {args.sampling_steps}")
+    patients_csv = pd.read_csv(patients_csv)
+    train_patients = patients_csv[patients_csv["split"] == "train"]
 
-    # Zero image conditioning mode (like Meryem's thesis - only AOE active)
-    if args.zero_image:
-        print("🔇 Zero image conditioning mode (c_img = 0, only AOE active)")
-        effective_image_scale = 0.0
-    else:
-        effective_image_scale = args.image_scale
+    # Ensure output directories exist for augmented images
+    for mes_score in range(4):
+        output_mes_dir = args.data_root / "train" / str(mes_score)
+        output_mes_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate
-    with torch.no_grad():
-        latents = _ddim_sample_ip(
-            module,
-            labels,
-            structure_tensor,
-            args.sampling_steps,
-            device,
-            eta=args.eta,
-            guidance_scale=args.guidance_scale,
-            image_scale=effective_image_scale,
+    skipped_count = 0
+    for idx, patient_row in tqdm(
+        train_patients.iterrows(), total=len(train_patients), desc="Processing patients"
+    ):
+        patient_id = str(patient_row["patient_id"])
+        image_id = str(patient_row["image_id"])
+
+        patients_df = _build_labels(
+            args.data_root,
+            patient_id,
+            image_id,
         )
 
-        images = _latents_to_images(module, latents)
+        if patients_df.empty:
+            skipped_count += 1
+            if skipped_count <= 10:  # Only show first 10 warnings
+                print(
+                    f"⚠️  Image not found for patient_{patient_id}_{image_id}, skipping..."
+                )
+            continue
 
-        # Save individual images
-        _save_sequence(images, labels, args.output_dir, display_tensor)
+        for _, row in patients_df.iterrows():
+            labels = torch.tensor(
+                [i for i in range(0, 4) if i != row["mes_score"]],
+                device=device,
+                dtype=torch.long,
+            )
 
-        # Create and save progression grid
-        grid_path = args.output_dir / "progression_grid.png"
-        _create_progression_grid(images, labels, display_tensor, grid_path)
+            structure_image_path = Path(row["image_path"])
 
-    print(f"✅ Saved {len(labels)} progression images to {args.output_dir}")
-    print(f"✅ Saved progression grid to {grid_path}")
+            structure_tensor, display_tensor = _load_and_preprocess_structure_image(
+                structure_image_path,
+                target_size=cfg.dataset.image_size,
+                device=device,
+                apply_blur=not args.no_blur,
+                blur_kernel_size=getattr(blur_config, "blur_kernel_size", 15),
+                blur_sigma=getattr(blur_config, "blur_sigma", 5.0),
+            )
+
+            with torch.no_grad():
+                latents = _ddim_sample_ip(
+                    module,
+                    labels,
+                    structure_tensor,
+                    args.sampling_steps,
+                    device,
+                    eta=args.eta,
+                    guidance_scale=args.guidance_scale,
+                    image_scale=args.image_scale,
+                )
+
+                images = _latents_to_images(module, latents)
+
+                # Save individual images
+                _save_sequence(
+                    images,
+                    labels,
+                    args.data_root,
+                    patient_id=patient_id,
+                    image_id=image_id,
+                )
+
+    # Print summary
+    if skipped_count > 0:
+        print(f"\n⚠️  Total skipped images (not found): {skipped_count}")
+    print("✅ Data augmentation completed!")
 
 
 if __name__ == "__main__":

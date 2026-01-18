@@ -24,8 +24,8 @@ model:
   blur_kernel_size: 11
   blur_sigma: 15.0
 
-  frequency_dominant_scale: 1.5
-  frequency_non_dominant_scale: 0.5
+  frequency_dominant_scale: 0.5
+  frequency_non_dominant_scale: 1.5
 
   ordinal_embedder:
     type: "aoe"
@@ -47,9 +47,9 @@ scheduler:
   min_lr: 1e-6
 
 dataset:
-  dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data
+  dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_copy
   batch_size: 32
-  num_workers: 1
+  num_workers: 22
   persistent_workers: true
   prefetch_factor: 2
   image_size: 256
@@ -60,7 +60,6 @@ dataset:
     flip: true
     rotation: 5
     center_crop: 224
-    color_jitter: True
     perspective: 0.2
 
 
@@ -81,14 +80,14 @@ training:
   use_compile: false
   compile_mode: "reduce-overhead"
   gradient_checkpointing: true
-  noise_offset: 0.1
+  noise_offset: 0.0
 
 
 wandb:
   project: "prog-disease-generation-ip"
-  run_name: "dominant_15_nondominant_05_aoe_blur9_sigma2_ip"
+  run_name: "dominant_1_nondominant_1_aoe_noblur_ip"
   log_samples_every_n_steps: 50
-  offline: True
+  offline: False
 
 diffusion:
   noise_schedule: "linear"

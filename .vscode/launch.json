@@ -22,17 +22,37 @@
       },
       "args": [
       //"--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/8dituazg_4th_try_noblur_all_same_weight/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
-      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/rzczftqi_second_try/checkpoints/ip-ddpm-epochepoch=0099.ckpt",
+      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/pvq7gpe7/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
       "--config", "configs/train_ip.yaml",
       "--sampling-steps", "50",
       "--mes-steps", "20",
-      "--output-dir", "outputs2/inferece_ip_blur_second_try_3_3levelimg_imgscale1_invert",
+      "--output-dir", "paper_outputs/pvq7gpe7_1_149_3scale",
       // "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/0/UC_patient_40_7.bmp",
       //"--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/1/UC_patient_448_54.bmp",
-      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_239_112.bmp",
+      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_copy/test/0/UC_patient_9_6.bmp",
       //"--no-blur",
+      "--image-scale", "0",
+      "--guidance-scale", "3"
+      ]
+    },
+     {
+      "name": "Inference Diffusion Data Augment",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/inference_pipeline_ip_data_augment.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+      //"--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/8dituazg_4th_try_noblur_all_same_weight/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/kwd2qy49/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--config", "configs/train_ip.yaml",
+      "--sampling-steps", "50",
+      "--mes-steps", "20",
+      "--data-root", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_scale2",
       "--image-scale", "1",
-      "--guidance-scale", "1.0"
+      "--guidance-scale", "2.0"
       ]
     },
     {
@@ -55,6 +75,21 @@
       "--guidance-scale", "1.0",
       "--use-ddim-invert"
       ]
-    }
+    },
+    {
+      "name": "Classifier Training",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/classification/train.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+      "--config", "configs/train_classifier.yaml",
+
+      ]
+    },
+
   ]
 }

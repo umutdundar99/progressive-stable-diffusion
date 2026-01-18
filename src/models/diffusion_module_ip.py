@@ -390,7 +390,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
         params = [
             {"params": self.unet.parameters(), "lr": opt_cfg.lr},
             {"params": self.ordinal_embedder.parameters(), "lr": opt_cfg.lr},
-            {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 10},
+            {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 2},
         ]
 
         optimizer = torch.optim.AdamW(
