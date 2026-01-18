@@ -1,0 +1,83 @@
+model:
+  name: "resnet18"  # resnet18, resnet34, resnet50, resnet101
+  pretrained: true
+  num_classes: 4
+  dropout: 0.3
+  freeze_backbone_epochs: 0  # Number of epochs to freeze backbone (0 = no freezing)
+
+
+dataset:
+  data_root: "data/limuc/processed_data_scale1"
+  image_size: 224
+  num_workers: 16
+  pin_memory: true
+
+logging:
+  project_name: "mes-classifier"
+  experiment_name: "resnet18-baseline-balanced-dataset-scale1"
+  log_every_n_steps: 10
+  save_top_k: 3
+  monitor_metric: "val/qwk"
+  monitor_mode: "max"  # max or min
+  offline: False
+
+training:
+  batch_size: 32
+  max_epochs: 75
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+  optimizer: "adamw"  # adam, adamw, sgd
+  scheduler: "cosine"  # cosine, step, plateau, none
+  scheduler_params:
+    T_max: 100  # for cosine
+    eta_min: 1e-6
+  label_smoothing: 0.1
+  class_weights: null  # null for auto-compute, or [w0, w1, w2, w3]
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+
+
+augmentation:
+  train:
+    random_horizontal_flip: 0.5
+    random_vertical_flip: 0.5
+    random_rotation: 15
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.1
+    random_affine:
+      degrees: 10
+      translate: [0.1, 0.1]
+      scale: [0.9, 1.1]
+    random_erasing: 0.2
+    gaussian_blur:
+      kernel_size: 5
+      sigma: [0.1, 2.0]
+      probability: 0.3
+    random_resized_crop:
+      scale: [0.8, 1.0]
+      ratio: [0.9, 1.1]
+  eval:
+    resize: 256
+    center_crop: 224
+
+
+checkpoint:
+  dirpath: "outputs/classifier"
+  filename: "{epoch:02d}-{val_qwk:.4f}"
+  save_last: true
+
+
+early_stopping:
+  patience: 15
+  min_delta: 0.001
+
+
+hardware:
+  accelerator: "auto"
+  devices: 1
+  precision: "16"  # 32, 16-mixed, bf16-mixed
+
+seed: 42

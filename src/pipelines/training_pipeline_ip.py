@@ -1,10 +1,13 @@
 """
-Training pipeline integrating Hydra, Lightning, and WandB.
+Training pipeline for IP-Adapter with Ordinal Disease Conditioning.
+
+This pipeline trains a diffusion model with dual conditioning:
+1. AOE (Additive Ordinal Embedding) for disease severity
+2. Image features for patient-specific anatomical structure
 """
 
 from __future__ import annotations
 
-# from lightning.loggers import WandbLogger
 import hydra
 from lightning import Trainer
 from lightning.pytorch.callbacks import (
@@ -15,28 +18,33 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig
 
 from src.callbacks.ema_callback import EMAWeightAveraging
-from src.data.datamodule import OrdinalDataModule
-from src.models.diffusion_module import DiffusionModule
+from src.data.datamodule_ip import OrdinalIPDataModule
+from src.models.diffusion_module_ip import DiffusionModuleWithIP
 
 
-@hydra.main(version_base="1.4", config_path="../../configs", config_name="train")
+@hydra.main(version_base="1.4", config_path="../../configs", config_name="train_ip")
 def main(cfg: DictConfig) -> None:
-    datamodule = OrdinalDataModule(cfg)
-    diffusion = DiffusionModule(cfg)
+    """Main training function for IP-Adapter."""
 
+    datamodule = OrdinalIPDataModule(cfg)
+
+    diffusion = DiffusionModuleWithIP(cfg)
+
+    # Logger
     wandb_logger = WandbLogger(
         project=cfg.wandb.project,
         name=cfg.wandb.run_name,
-        log_model="all" if not cfg.wandb.offline else False,
+        log_model=False,
         offline=cfg.wandb.offline,
     )
 
+    # Callbacks
     checkpoint_callback = ModelCheckpoint(
-        every_n_epochs=10,
-        save_last=False,
+        every_n_epochs=50,
+        save_last=True,
         save_top_k=-1,
         save_on_train_epoch_end=True,
-        filename="ddpm-epoch{epoch:04d}",
+        filename="ip-ddpm-epoch{epoch:04d}",
     )
 
     ema_callback = EMAWeightAveraging(
@@ -53,6 +61,7 @@ def main(cfg: DictConfig) -> None:
         lr_monitor,
     ]
 
+    # Trainer
     trainer = Trainer(
         logger=wandb_logger,
         callbacks=callbacks,
@@ -68,7 +77,7 @@ def main(cfg: DictConfig) -> None:
         deterministic=False,
         enable_checkpointing=True,
         accumulate_grad_batches=cfg.training.get("accumulate_grad_batches", 1),
-        benchmark=True,  # Enable cudnn.benchmark for faster training
+        benchmark=True,
     )
 
     trainer.fit(model=diffusion, datamodule=datamodule)

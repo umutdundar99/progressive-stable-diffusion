@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from torch import Tensor, nn
-
 from diffusers import UNet2DConditionModel
+from torch import Tensor, nn
 
 
 @dataclass
@@ -112,22 +111,25 @@ class OrdinalUNet(nn.Module):
                 Timestep tensor of shape (B,) or scalar, indicating the
                 diffusion step for each sample.
             cond_embed:
-                Ordinal embedding tensor of shape (B, D), where
-                D = config.conditioning_dim. This will be treated as a
-                single "token" per sample for cross-attention.
+                Conditioning embedding tensor. Accepts two formats:
+                - (B, D): Single embedding per sample, will be unsqueezed to (B, 1, D)
+                - (B, seq_len, D): Multiple tokens per sample (e.g., AOE + image tokens)
+                where D = config.conditioning_dim.
 
         Returns:
             Predicted noise tensor of shape (B, 4, H, W).
         """
-        if cond_embed.ndim != 2:
+        if cond_embed.ndim == 2:
+            # Single embedding per sample: (B, D) -> (B, 1, D)
+            encoder_hidden_states = cond_embed.unsqueeze(1)
+        elif cond_embed.ndim == 3:
+            # Multiple tokens per sample: (B, seq_len, D) -> use directly
+            encoder_hidden_states = cond_embed
+        else:
             raise ValueError(
-                f"cond_embed must have shape (B, D), got {cond_embed.shape}"
+                f"cond_embed must have shape (B, D) or (B, seq_len, D), got {cond_embed.shape}"
             )
 
-      
-        encoder_hidden_states = cond_embed.unsqueeze(1)  # (B, 1, D)
-
-      
         if timesteps.ndim == 0:
             timesteps = timesteps[None]
         elif timesteps.ndim > 1:
@@ -140,5 +142,5 @@ class OrdinalUNet(nn.Module):
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
         )
-  
+
         return out.sample

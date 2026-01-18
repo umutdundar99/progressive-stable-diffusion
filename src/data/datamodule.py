@@ -5,14 +5,14 @@ Data pipeline for LIMUC ordinal disease dataset.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import os
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
+from lightning import LightningDataModule
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import datasets, transforms
-from pytorch_lightning import LightningDataModule
 
 
 class LIMUCDataset(Dataset):
@@ -32,31 +32,16 @@ class LIMUCDataset(Dataset):
 
     def __init__(
         self,
-        root: Path,
+        root: str,
         transform: Optional[Callable] = None,
         continuous: bool = True,
-        val_ratio: float = 0.2, 
-        is_train: bool = True,
     ) -> None:
-        
-        full_dataset = datasets.ImageFolder(str(root), transform=transform)
-        if not is_train:
-            val_size = int(len(full_dataset) * val_ratio)
-            train_size = len(full_dataset) - val_size
-            _, self.dataset = torch.utils.data.random_split(
-                full_dataset, [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-        else:
-            train_size = int(len(full_dataset) * (1 - val_ratio))
-            val_size = len(full_dataset) - train_size
-            self.dataset, _ = torch.utils.data.random_split(
-                full_dataset, [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-
         self.continuous = continuous
-        self.dataset = self.dataset.dataset
+
+        self.dataset = datasets.ImageFolder(
+            root=root,
+            transform=transform,
+        )
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -81,14 +66,17 @@ class OrdinalDataModule(LightningDataModule):
 
         self.cfg = cfg
 
-        self.dataset_path = Path(cfg.dataset.dataset_path)
-        self.val_path = Path(cfg.dataset.val_path)
+        self.dataset_path = cfg.dataset.dataset_path
+
         self.image_size = cfg.dataset.image_size
-        self.center_crop = getattr(cfg.dataset, "center_crop", None)
         self.batch_size = cfg.dataset.batch_size
         self.num_workers = cfg.dataset.num_workers
         self.augmentation = cfg.dataset.augmentation
         self.sampler = cfg.dataset.sampler
+
+        # Advanced data loading options
+        self.persistent_workers = getattr(cfg.dataset, "persistent_workers", True)
+        self.prefetch_factor = getattr(cfg.dataset, "prefetch_factor", 2)
 
         self._train_dataset: Optional[LIMUCDataset] = None
         self._val_dataset: Optional[LIMUCDataset] = None
@@ -96,12 +84,9 @@ class OrdinalDataModule(LightningDataModule):
     def _build_transforms(self, train: bool) -> transforms.Compose:
         ops = []
 
-       
-        if self.center_crop:
-            ops.append(transforms.CenterCrop(self.center_crop))
+        ops.append(transforms.CenterCrop(self.augmentation["center_crop"]))
         ops.append(transforms.Resize((self.image_size, self.image_size)))
 
-        
         if train:
             if self.augmentation.get("flip", False):
                 ops.append(transforms.RandomHorizontalFlip(p=0.5))
@@ -110,11 +95,10 @@ class OrdinalDataModule(LightningDataModule):
             if self.augmentation.get("color_jitter", False):
                 ops.append(transforms.ColorJitter(0.2, 0.2, 0.2, 0.1))
 
-        
         ops.extend(
             [
                 transforms.ToTensor(),
-                transforms.Normalize([0.5] * 3, [0.5] * 3), 
+                transforms.Normalize([0.5] * 3, [0.5] * 3),
             ]
         )
 
@@ -123,11 +107,18 @@ class OrdinalDataModule(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in (None, "fit"):
             self._train_dataset = LIMUCDataset(
-                self.dataset_path, transform=self._build_transforms(train=True)
+                os.path.join(self.dataset_path, "train"),
+                transform=self._build_transforms(train=True),
             )
-            self._val_dataset = LIMUCDataset(self.dataset_path, transform=self._build_transforms(train=False), is_train=False)
+            # self._val_dataset = LIMUCDataset(
+            #     os.path.join(self.dataset_path, "val"),
+            #     transform=self._build_transforms(train=False),
+            # )
+            # self._test_dataset = LIMUCDataset(
+            #     os.path.join(self.dataset_path, "test"),
+            #     transform=self._build_transforms(train=False),
+            # )
 
- 
     def _build_sampler(self, dataset: LIMUCDataset) -> Optional[WeightedRandomSampler]:
         if self.sampler != "class_balanced":
             return None
@@ -144,7 +135,6 @@ class OrdinalDataModule(LightningDataModule):
             sample_weights.tolist(), num_samples=len(sample_weights), replacement=True
         )
 
-
     def train_dataloader(self) -> DataLoader:
         if self._train_dataset is None:
             self.setup()
@@ -159,17 +149,37 @@ class OrdinalDataModule(LightningDataModule):
             shuffle=sampler is None,
             num_workers=self.num_workers,
             pin_memory=True,
+            persistent_workers=self.persistent_workers and self.num_workers > 0,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            drop_last=True,  # Avoid issues with batch norm on small last batches
         )
 
-    def val_dataloader(self) -> DataLoader:
-        if self._val_dataset is None:
-            self.setup()
-        assert self._val_dataset is not None
+    # def val_dataloader(self) -> DataLoader:
+    #     if self._val_dataset is None:
+    #         self.setup()
 
-        return DataLoader(
-            self._val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
+    #     assert self._val_dataset is not None
+
+    #     return DataLoader(
+    #         self._val_dataset,
+    #         batch_size=self.batch_size,
+    #         shuffle=False,
+    #         num_workers=self.num_workers,
+    #         pin_memory=True,
+    #         persistent_workers=self.persistent_workers and self.num_workers > 0,
+    #         prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+    #     )
+
+    # def test_dataloader(self) -> DataLoader:
+    #     if self._test_dataset is None:
+    #         self.setup()
+
+    #     assert self._test_dataset is not None
+
+    #     return DataLoader(
+    #         self._test_dataset,
+    #         batch_size=self.batch_size,
+    #         shuffle=False,
+    #         num_workers=self.num_workers,
+    #         pin_memory=True,
+    #     )

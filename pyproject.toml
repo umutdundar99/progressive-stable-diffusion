@@ -26,7 +26,14 @@ dependencies = [
     "pandas>=2.1",
     "diffusers>=0.31.0",
     "Pillow>=10",
+    "lightning-bolts>=0.7.0",
 ]
+
+[project.optional-dependencies.metrics]
+# Optional dependencies for evaluation metrics
+torchmetrics = ["torchmetrics[image]>=1.0"]
+lpips = ["lpips>=0.1.4"]
+scikit-image = ["scikit-image>=0.21"]
 
 [project.optional-dependencies]
 dev = [

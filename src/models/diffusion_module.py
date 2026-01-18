@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
+import lightning as pl
 import torch
-from torch import Tensor
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
+from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+from torch import Tensor
 
-import pytorch_lightning as pl
-
-from .vae import SDVAE
-from .ordinal_embedder import BasicOrdinalEmbedder, AdditiveOrdinalEmbedder
+from .ordinal_embedder import AdditiveOrdinalEmbedder, BasicOrdinalEmbedder
 from .unet import OrdinalUNet, UNetConfig
+from .vae import SDVAE
 
 
 @dataclass
@@ -28,6 +25,8 @@ class DiffusionConfig:
     min_snr_gamma: float = 1.0
     ema_update_interval: int = 10
     latent_scale: float = 0.18215
+    noise_offset: float = 0.0
+    input_perturbation: float = 0.0
 
 
 class DiffusionModule(pl.LightningModule):
@@ -36,7 +35,6 @@ class DiffusionModule(pl.LightningModule):
 
     - SD VAE (frozen)
     - Ordinal-conditioned UNet (Stable Diffusion v1.4 style)
-    - EMA weights for stable sampling
     - Min-SNR gamma weighting for loss
     """
 
@@ -54,7 +52,6 @@ class DiffusionModule(pl.LightningModule):
         super().__init__()
         self.cfg = cfg
 
-
         self.diff_cfg = DiffusionConfig(
             num_train_timesteps=cfg.diffusion.num_train_timesteps,
             beta_start=cfg.diffusion.beta_start,
@@ -65,19 +62,23 @@ class DiffusionModule(pl.LightningModule):
             min_snr_gamma=cfg.diffusion.min_snr_gamma,
             ema_update_interval=cfg.diffusion.ema_update_interval,
             latent_scale=getattr(cfg.diffusion, "latent_scale", 0.18215),
+            noise_offset=getattr(cfg.training, "noise_offset", 0.0),
+            input_perturbation=getattr(cfg.training, "input_perturbation", 0.0),
         )
 
-
         if getattr(cfg.model, "use_pretrained_vae", True):
-            vae_path = getattr(cfg.model, "pretrained_vae_path", cfg.model.pretrained_unet_path)
+            vae_path = getattr(
+                cfg.model, "pretrained_vae_path", cfg.model.pretrained_unet_path
+            )
             self.vae = SDVAE(
                 pretrained_path=vae_path,
-                torch_dtype=torch.float16 if self.cfg.training.precision == 16 else torch.float32,
+                torch_dtype=torch.float16
+                if self.cfg.training.precision == 16
+                else torch.float32,
                 local_files_only=False,
             )
         else:
             raise ValueError("This module expects a pretrained SD VAE.")
-
 
         emb_cfg = cfg.model.ordinal_embedder
         if emb_cfg.type.lower() == "boe":
@@ -89,10 +90,10 @@ class DiffusionModule(pl.LightningModule):
             self.ordinal_embedder = AdditiveOrdinalEmbedder(
                 num_classes=emb_cfg.num_classes,
                 embedding_dim=cfg.model.embedding_dim,
+                delta_scale=getattr(emb_cfg.aoe, "delta_scale", 0.1),
             )
         else:
             raise ValueError(f"Unknown ordinal embedder type: {emb_cfg.type}")
-
 
         unet_config = UNetConfig(
             pretrained_unet_path=cfg.model.pretrained_unet_path,
@@ -102,43 +103,39 @@ class DiffusionModule(pl.LightningModule):
         )
         self.unet = OrdinalUNet(unet_config)
 
-        # EMA copy of UNet for stable inference
-        self.ema_unet = OrdinalUNet(unet_config)
-        self._init_ema()
+        # Enable gradient checkpointing for memory efficiency
+        if getattr(cfg.training, "gradient_checkpointing", False):
+            if hasattr(self.unet.unet, "enable_gradient_checkpointing"):
+                self.unet.unet.enable_gradient_checkpointing()
+                print("Gradient checkpointing enabled for UNet")
+
+        # torch.compile for speedup (PyTorch 2.0+)
+        if getattr(cfg.training, "use_compile", False):
+            compile_mode = getattr(cfg.training, "compile_mode", "reduce-overhead")
+            try:
+                self.unet = torch.compile(self.unet, mode=compile_mode)
+                print(f"torch.compile enabled with mode='{compile_mode}'")
+            except Exception as e:
+                print(f"torch.compile failed: {e}. Continuing without compilation.")
 
         betas, alphas_cumprod = self._build_noise_schedule()
         self.register_buffer("betas", betas, persistent=False)
         self.register_buffer("alphas_cumprod", alphas_cumprod, persistent=False)
 
-        # Previous cumulative alphas (for sampling; even if not used yet)
+        # Previous cumulative alphas (for sampling; DDPM/DDIM)
         alphas_cumprod_prev = torch.cat(
             [torch.ones(1, dtype=alphas_cumprod.dtype), alphas_cumprod[:-1]],
             dim=0,
         )
-        self.register_buffer("alphas_cumprod_prev", alphas_cumprod_prev, persistent=False)
+        self.register_buffer(
+            "alphas_cumprod_prev", alphas_cumprod_prev, persistent=False
+        )
 
         # For Min-SNR computation
         snr_values = alphas_cumprod / (1.0 - alphas_cumprod + 1e-8)
         self.register_buffer("snr_values", snr_values, persistent=False)
 
-        # Save hyperparameters for reproducibility (excluding non-serializable objects)
-        self.save_hyperparameters(ignore=["vae", "unet", "ema_unet", "ordinal_embedder"])
-
-    def _init_ema(self) -> None:
-        """Initialize EMA weights to match the UNet."""
-        self.ema_unet.load_state_dict(self.unet.state_dict())
-        for p in self.ema_unet.parameters():
-            p.requires_grad_(False)
-
-    @torch.no_grad()
-    def _update_ema(self, decay: float) -> None:
-        """Update EMA weights using the current UNet parameters."""
-        ema_params = dict(self.ema_unet.named_parameters())
-        model_params = dict(self.unet.named_parameters())
-        for name, param in model_params.items():
-            ema_param = ema_params[name]
-            ema_param.data.mul_(decay).add_(param.data, alpha=1.0 - decay)
-
+        self.save_hyperparameters(ignore=["vae", "unet", "ordinal_embedder"])
 
     def _build_noise_schedule(self) -> Tuple[Tensor, Tensor]:
         """
@@ -161,7 +158,6 @@ class DiffusionModule(pl.LightningModule):
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         return betas, alphas_cumprod
-
 
     def _sample_timesteps(self, batch_size: int) -> Tensor:
         """Sample random timesteps uniformly."""
@@ -190,54 +186,77 @@ class DiffusionModule(pl.LightningModule):
 
         gamma = self.diff_cfg.min_snr_gamma
         snr = self.snr_values[t]
-        clipped = torch.minimum(snr, torch.tensor(gamma, device=snr.device, dtype=snr.dtype))
+        clipped = torch.minimum(
+            snr, torch.tensor(gamma, device=snr.device, dtype=snr.dtype)
+        )
         weight = clipped / (snr + 1e-8)
         return weight
-
 
     def forward(
         self,
         latents: Tensor,
         timesteps: Tensor,
         cond_embed: Tensor,
-        use_ema: bool = True,
     ) -> Tensor:
         """
-        Forward pass through UNet (EMA or raw) to predict noise.
+        Forward pass through UNet to predict noise.
 
         Args:
             latents: (B, 4, H, W)
             timesteps: (B,)
             cond_embed: (B, D)
-            use_ema: Whether to use EMA weights (for inference).
 
         Returns:
             Predicted noise of shape (B, 4, H, W)
         """
-        model = self.ema_unet if use_ema else self.unet
-        return model(latents, timesteps, cond_embed)
+        return self.unet(latents, timesteps, cond_embed)
 
     def training_step(self, batch: Any, batch_idx: int) -> Tensor:
         images, labels = batch  # images: (B, 3, H, W), labels: (B,) continuous MES
 
         # Encode images to latents and apply SD latent scaling
         vae_output = self.vae.encode(images)
-        latents = vae_output.latent_dist.sample() * self.diff_cfg.latent_scale  # (B, 4, H/8, W/8)
+        latents = (
+            vae_output.latent_dist.sample() * self.diff_cfg.latent_scale
+        )  # (B, 4, H/8, W/8)
 
-        # Sample noise and timesteps
+        # Sample noise with optional noise offset for better contrast
+        # Reference: https://www.crosslabs.org/blog/diffusion-with-offset-noise
         noise = torch.randn_like(latents)
+        if self.diff_cfg.noise_offset > 0:
+            # Add channel-wise offset noise for better contrast in dark/bright regions
+            noise_offset = self.diff_cfg.noise_offset * torch.randn(
+                latents.shape[0],
+                latents.shape[1],
+                1,
+                1,
+                device=latents.device,
+                dtype=latents.dtype,
+            )
+            noise = noise + noise_offset
+
+        # Sample timesteps
         t = self._sample_timesteps(latents.shape[0])
 
-        # Add noise according to q(x_t | x_0)
-        noisy_latents = self._q_sample(latents, t, noise)
+        # Optional: Input perturbation for better training stability
+        # Reference: https://arxiv.org/abs/2301.11706 (Common Diffusion Noise Schedules)
+        if self.diff_cfg.input_perturbation > 0:
+            new_noise = noise + self.diff_cfg.input_perturbation * torch.randn_like(
+                noise
+            )
+            noisy_latents = self._q_sample(latents, t, new_noise)
+        else:
+            noisy_latents = self._q_sample(latents, t, noise)
 
-        # Obtain ordinal embeddings from continuous labels
-        cond_embed = self.ordinal_embedder(labels)  # (B, D)
+        # Get ordinal conditioning embeddings
+        cond_embed = self.ordinal_embedder(
+            labels, is_training=True, unconditional=False
+        )
 
-        # Predict noise with UNet (raw weights for training)
+        # Predict noise with UNet
         noise_pred = self.unet(noisy_latents, t, cond_embed)
 
-        # Compute MSE loss
+        # Compute MSE loss (always against original noise, not perturbed)
         base_loss = F.mse_loss(noise_pred, noise, reduction="none")
         base_loss = base_loss.mean(dim=(1, 2, 3))  # per-sample
 
@@ -245,16 +264,23 @@ class DiffusionModule(pl.LightningModule):
         weight = self._min_snr_weight(t)
         loss = (weight * base_loss).mean()
 
-        self.log("train/loss", loss, on_step=True, on_epoch=False, prog_bar=True)
-        self.log("train/loss_base", base_loss.mean(), on_step=True, on_epoch=False)
-        self.log("train/min_snr_weight_mean", weight.mean(), on_step=True, on_epoch=False)
+        # Note: sync_dist=False for step logging (sync_dist=True causes GPU sync every step!)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss_base", base_loss.mean(), on_step=False, on_epoch=True)
+        self.log(
+            "train/min_snr_weight_mean", weight.mean(), on_step=False, on_epoch=True
+        )
 
-        # EMA update
-        if (self.global_step + 1) % self.diff_cfg.ema_update_interval == 0:
-            ema_decay = self.cfg.training.ema_decay
-            self._update_ema(decay=ema_decay)
+        # Log embedding statistics every 500 steps to monitor for exploding/collapsing embeddings
+        if batch_idx % 500 == 0:
+            embed_stats = self.ordinal_embedder.log_embedding_stats()
+            for key, value in embed_stats.items():
+                self.log(key, value, on_step=True, on_epoch=False)
 
         return loss
+
+    def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
+        pass
 
     def configure_optimizers(self) -> Dict[str, Any]:
         opt_cfg = self.cfg.optimizer
@@ -262,36 +288,30 @@ class DiffusionModule(pl.LightningModule):
         if opt_cfg.name.lower() != "adamw":
             raise NotImplementedError(f"Only AdamW is implemented, got: {opt_cfg.name}")
 
+        params_to_optimize = list(self.unet.parameters()) + list(
+            self.ordinal_embedder.parameters()
+        )
         optimizer = torch.optim.AdamW(
-            self.unet.parameters(),
+            params_to_optimize,
             lr=opt_cfg.lr,
             betas=tuple(opt_cfg.betas),
             weight_decay=opt_cfg.weight_decay,
-            eps=opt_cfg.eps,
         )
 
-        # Cosine schedule with warmup (step-based)
-        sched_cfg = self.cfg.scheduler
-        warmup_steps = sched_cfg.warmup_steps
-        max_steps = sched_cfg.max_steps
-        min_lr = sched_cfg.min_lr
-        base_lr = opt_cfg.lr
-
-        def lr_lambda(step: int) -> float:
-            if step < warmup_steps:
-                return float(step + 1) / float(max(1, warmup_steps))
-            progress = float(step - warmup_steps) / float(max(1, max_steps - warmup_steps))
-            # Cosine decay from base_lr to min_lr
-            cosine = 0.5 * (1.0 + torch.cos(torch.pi * torch.tensor(progress)))
-            return float(min_lr / base_lr + (1.0 - min_lr / base_lr) * cosine)
-
-        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        # Learning rate scheduler
+        scheduler = LinearWarmupCosineAnnealingLR(
+            optimizer=optimizer,
+            warmup_epochs=self.cfg.scheduler.warmup_epochs,
+            max_epochs=self.cfg.training.max_epochs,
+            warmup_start_lr=self.cfg.optimizer.lr * 0.01,
+            eta_min=self.cfg.scheduler.min_lr,
+        )
 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
+                "interval": "epoch",
                 "frequency": 1,
             },
         }
