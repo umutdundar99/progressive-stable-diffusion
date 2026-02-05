@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Ordinal-aware diffusion research implementation using PyTorch Lightning and Hydra."
 requires-python = ">=3.10"
 readme = "README.md"
-authors = [ { name = "Auto Generated", email = "dev@progressive-ai.example" } ]
+authors = [ { name = "Umut DUNDAR", email = "umutdundar37@gmail.com" } ]
 keywords = ["diffusion", "pytorch-lightning", "hydra", "ordinal", "stable-diffusion"]
 classifiers = [
     "Programming Language :: Python :: 3.10",
@@ -26,16 +26,16 @@ dependencies = [
     "pandas>=2.1",
     "diffusers>=0.31.0",
     "Pillow>=10",
-    "lightning-bolts>=0.7.0",
 ]
 
-[project.optional-dependencies.metrics]
-# Optional dependencies for evaluation metrics
-torchmetrics = ["torchmetrics[image]>=1.0"]
-lpips = ["lpips>=0.1.4"]
-scikit-image = ["scikit-image>=0.21"]
 
 [project.optional-dependencies]
+metrics = [
+    "torchmetrics[image]>=1.0",
+    "lpips>=0.1.4",
+    "scikit-image>=0.21"
+]
+
 dev = [
     "black>=24.9",
     "isort>=5.12",
@@ -76,18 +76,3 @@ select = ["E", "F", "W", "I", "D", "B"]
 ignore = ["D106"]
 exclude = ["build", "dist", "__pycache__"]
 
-[tool.uv]
-source-dir = "src"
-# Train/inference CLI wrappers should rely on scripts/entry points or CLI modules
-commands = ["python -m src.main"]
-install = [
-    "torch>=2.1.0",
-    "torchvision>=0.16.0",
-    "pytorch-lightning>=2.1.0",
-    "hydra-core>=1.3.2,<1.4",
-    "wandb>=0.15",
-    "numpy>=1.25",
-    "einops>=0.6",
-    "pandas>=2.1",
-    "Pillow>=10",
-]
