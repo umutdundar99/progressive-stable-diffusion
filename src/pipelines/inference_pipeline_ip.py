@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
@@ -277,6 +278,192 @@ def _prepare_conditioning(
     return combined
 
 
+def _contribution_to_heatmap(
+    contribution: Tensor,
+    target_size: Tuple[int, int],
+) -> np.ndarray:
+    """
+    Convert contribution map (L2 norms) to a colorized heatmap.
+
+    Args:
+        contribution: Tensor of shape (batch, seq_len) or (seq_len,)
+        target_size: (H, W) to resize heatmap to
+
+    Returns:
+        Colorized heatmap as numpy array (H, W, 3) in range [0, 255]
+    """
+    import matplotlib.pyplot as plt
+
+    if contribution.dim() == 2:
+        contribution = contribution[0]
+
+    seq_len = contribution.shape[0]
+    spatial_size = int(np.sqrt(seq_len))
+
+    heatmap = contribution.view(spatial_size, spatial_size).numpy()
+
+    print(
+        f"    Heatmap stats: min={heatmap.min():.4f}, max={heatmap.max():.4f}, std={heatmap.std():.4f}"
+    )
+
+    p_low, p_high = np.percentile(heatmap, [2, 98])
+    if p_high - p_low < 1e-6:
+        print("Low variance in heatmap, using uniform visualization")
+        heatmap = np.ones_like(heatmap) * 0.5
+    else:
+        heatmap = np.clip(heatmap, p_low, p_high)
+        heatmap = (heatmap - p_low) / (p_high - p_low)
+
+    cmap = plt.cm.jet
+    colored = cmap(heatmap)[:, :, :3]
+    colored = (colored * 255).astype(np.uint8)
+
+    colored_pil = Image.fromarray(colored)
+    colored_pil = colored_pil.resize(target_size, Image.Resampling.BILINEAR)
+
+    return np.array(colored_pil)
+
+
+def _overlay_heatmap_on_image(
+    image: np.ndarray,
+    heatmap: np.ndarray,
+    alpha: float = 0.5,
+) -> np.ndarray:
+    """
+    Overlay heatmap on image with transparency.
+
+    Args:
+        image: RGB image (H, W, 3) in range [0, 255]
+        heatmap: Colorized heatmap (H, W, 3) in range [0, 255]
+        alpha: Blend factor (0=image only, 1=heatmap only)
+
+    Returns:
+        Blended image (H, W, 3) in range [0, 255]
+    """
+    blended = (1 - alpha) * image.astype(np.float32) + alpha * heatmap.astype(
+        np.float32
+    )
+    return blended.clip(0, 255).astype(np.uint8)
+
+
+def _visualize_contribution_maps(
+    attn_maps: Dict[str, List[Tensor]],
+    images: Tensor,
+    labels: Tensor,
+    output_dir: Path,
+) -> None:
+    """
+    Create and save contribution map visualizations.
+
+    Args:
+        attn_maps: Dict with 'aoe' and 'ip' keys, each containing list of contribution maps
+        images: Generated images (B, 3, H, W) in range [0, 1]
+        labels: MES labels (B,)
+        output_dir: Directory to save visualizations
+    """
+    import matplotlib.pyplot as plt
+
+    viz_dir = output_dir / "attention_visualizations"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+
+    # Average contribution maps across timesteps
+    aoe_maps = [m for m in attn_maps["aoe"] if m is not None]
+    ip_maps = [m for m in attn_maps["ip"] if m is not None]
+
+    if not aoe_maps and not ip_maps:
+        print("⚠️  No attention maps collected for visualization")
+        return
+
+    height, width = images.shape[2], images.shape[3]
+    target_size = (width, height)
+
+    # Process each sample in batch
+    batch_size = images.shape[0]
+
+    for b in range(batch_size):
+        label = labels[b].item()
+        print(f"📊 Processing attention maps for MES {label:.2f}")
+
+        # Convert image to numpy
+        img_np = (images[b].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+
+        # Average AOE contributions across all collected timesteps for this sample
+        if aoe_maps:
+            print(f"  AOE maps collected: {len(aoe_maps)}")
+            aoe_avg = torch.stack([m[b] if m.dim() == 2 else m for m in aoe_maps]).mean(
+                dim=0
+            )
+            print("  AOE (query-value alignment):")
+            aoe_heatmap = _contribution_to_heatmap(aoe_avg, target_size)
+            aoe_overlay = _overlay_heatmap_on_image(img_np, aoe_heatmap, alpha=0.4)
+
+            # Save AOE heatmap
+            Image.fromarray(aoe_heatmap).save(
+                viz_dir / f"aoe_heatmap_mes_{label:.2f}.png"
+            )
+            Image.fromarray(aoe_overlay).save(
+                viz_dir / f"aoe_overlay_mes_{label:.2f}.png"
+            )
+
+        # Average IP contributions across all collected timesteps for this sample
+        if ip_maps:
+            print(f"  IP maps collected: {len(ip_maps)}")
+            ip_avg = torch.stack([m[b] if m.dim() == 2 else m for m in ip_maps]).mean(
+                dim=0
+            )
+            print("  IP (attention sum):")
+            ip_heatmap = _contribution_to_heatmap(ip_avg, target_size)
+            ip_overlay = _overlay_heatmap_on_image(img_np, ip_heatmap, alpha=0.4)
+
+            # Save IP heatmap
+            Image.fromarray(ip_heatmap).save(
+                viz_dir / f"ip_heatmap_mes_{label:.2f}.png"
+            )
+            Image.fromarray(ip_overlay).save(
+                viz_dir / f"ip_overlay_mes_{label:.2f}.png"
+            )
+
+        # Create combined figure
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(f"Attention Contribution Maps - MES {label:.2f}", fontsize=14)
+
+        # Row 1: AOE
+        axes[0, 0].imshow(img_np)
+        axes[0, 0].set_title("Generated Image")
+        axes[0, 0].axis("off")
+
+        if aoe_maps:
+            axes[0, 1].imshow(aoe_heatmap)
+            axes[0, 1].set_title("AOE Contribution")
+            axes[0, 1].axis("off")
+
+            axes[0, 2].imshow(aoe_overlay)
+            axes[0, 2].set_title("AOE Overlay")
+            axes[0, 2].axis("off")
+
+        # Row 2: IP
+        axes[1, 0].imshow(img_np)
+        axes[1, 0].set_title("Generated Image")
+        axes[1, 0].axis("off")
+
+        if ip_maps:
+            axes[1, 1].imshow(ip_heatmap)
+            axes[1, 1].set_title("IP Contribution")
+            axes[1, 1].axis("off")
+
+            axes[1, 2].imshow(ip_overlay)
+            axes[1, 2].set_title("IP Overlay")
+            axes[1, 2].axis("off")
+
+        plt.tight_layout()
+        plt.savefig(
+            viz_dir / f"combined_mes_{label:.2f}.png", dpi=150, bbox_inches="tight"
+        )
+        plt.close(fig)
+
+    print(f"✅ Saved attention visualizations to {viz_dir}")
+
+
 def _ddim_sample_ip(
     module: DiffusionModuleWithIP,
     labels: Tensor,
@@ -345,6 +532,10 @@ def _ddim_sample_ip(
     # CFG: concat unconditional + conditional
     embed = torch.cat([uncond_embed, cond_embed], dim=0)  # (2*B, seq, D)
 
+    # TODO: for visualization only
+    timesteps_to_visualize = timesteps[:10]
+    attn_maps = {"ip": [], "aoe": []}
+
     # DDIM loop
     for i, t_scalar in enumerate(timesteps):
         t_int = int(t_scalar.item())
@@ -356,6 +547,19 @@ def _ddim_sample_ip(
 
         # Predict noise
         noise_pred = module(latent_model_input, t_model_input, embed)
+        if t_scalar in timesteps_to_visualize:
+            # Only collect from mid_block (consistent spatial resolution)
+            for name, attn_processor in module.unet.unet.attn_processors.items():
+                if "mid_block" in name and hasattr(
+                    attn_processor, "get_last_attention_maps"
+                ):
+                    maps = attn_processor.get_last_attention_maps()
+                    if maps["ip"] is not None:
+                        cond_ip = maps["ip"][num_samples:]
+                        attn_maps["ip"].append(cond_ip.cpu())
+                    if maps["aoe"] is not None:
+                        cond_aoe = maps["aoe"][num_samples:]
+                        attn_maps["aoe"].append(cond_aoe.cpu())
 
         # CFG
         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
@@ -405,7 +609,7 @@ def _ddim_sample_ip(
                 + sigma * noise
             )
 
-    return latents
+    return latents, attn_maps
 
 
 def _latents_to_images(module: DiffusionModuleWithIP, latents: Tensor) -> Tensor:
@@ -537,6 +741,8 @@ def main() -> None:
     module = DiffusionModuleWithIP.load_from_checkpoint(
         str(args.checkpoint),
         cfg=cfg,
+        map_location="cpu",
+        weights_only=False,
     )
     module = module.to(device)
     module = module.to(torch.float32)
@@ -578,7 +784,7 @@ def main() -> None:
 
     # Generate
     with torch.no_grad():
-        latents = _ddim_sample_ip(
+        latents, attn_maps = _ddim_sample_ip(
             module,
             labels,
             structure_tensor,
@@ -597,6 +803,9 @@ def main() -> None:
         # Create and save progression grid
         grid_path = args.output_dir / "progression_grid.png"
         _create_progression_grid(images, labels, display_tensor, grid_path)
+
+        # Visualize attention contribution maps
+        _visualize_contribution_maps(attn_maps, images, labels, args.output_dir)
 
     print(f"✅ Saved {len(labels)} progression images to {args.output_dir}")
     print(f"✅ Saved progression grid to {grid_path}")

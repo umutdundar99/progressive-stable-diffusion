@@ -18,13 +18,13 @@ from typing import Any, Dict, Tuple
 import lightning as pl
 import torch
 import torch.nn.functional as F
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch import Tensor
 
 from .attention_processor import (
     set_ordinal_ip_attention_processors,
 )
 from .image_encoder import ImageEncoder, ImageProjection, ImageProjectionPlus
+from .lr_scheduler import LinearWarmupCosineAnnealingLR
 from .ordinal_embedder import AdditiveOrdinalEmbedder
 from .unet import OrdinalUNet, UNetConfig
 from .vae import SDVAE
@@ -106,13 +106,12 @@ class DiffusionModuleWithIP(pl.LightningModule):
             local_files_only=False,
         )
 
-        # IMAGE ENCODER (FROZEN) + PROJECTION (TRAINABLE)
         self.image_encoder = ImageEncoder(
             pretrained_path=self.diff_cfg.image_encoder_path,
             torch_dtype=torch.float32,
+            local_files_only=False,
         )
 
-        # Choose projection type
         if self.diff_cfg.use_image_projection_plus:
             self.image_projection = ImageProjectionPlus(
                 clip_hidden_dim=self.image_encoder.hidden_size,
@@ -141,9 +140,9 @@ class DiffusionModuleWithIP(pl.LightningModule):
             conditioning_dim=cfg.model.conditioning_dim,
             in_channels=cfg.model.latent_channels,
             out_channels=cfg.model.latent_channels,
+            local_files_only=False,
         )
         self.unet = OrdinalUNet(unet_config)
-
         self._setup_attention_processors()
 
         betas, alphas_cumprod = self._build_noise_schedule()
@@ -174,7 +173,6 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
     def _setup_attention_processors(self) -> None:
         """Replace UNet attention processors with OrdinalIPAttnProcessors."""
-        # Access the underlying diffusers UNet
         unet = self.unet.unet
 
         frequency_dominant_scale = self.cfg.model["frequency_dominant_scale"]

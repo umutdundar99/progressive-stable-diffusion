@@ -26,6 +26,8 @@ dependencies = [
     "pandas>=2.1",
     "diffusers>=0.31.0",
     "Pillow>=10",
+    "transformers>=4.37.0",
+    "lightning>=2.1.0",
 ]
 
 
@@ -75,4 +77,3 @@ line-length = 100
 select = ["E", "F", "W", "I", "D", "B"]
 ignore = ["D106"]
 exclude = ["build", "dist", "__pycache__"]
-

@@ -6,9 +6,9 @@ from typing import Any, Dict, Tuple
 import lightning as pl
 import torch
 import torch.nn.functional as F
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch import Tensor
 
+from .lr_scheduler import LinearWarmupCosineAnnealingLR
 from .ordinal_embedder import AdditiveOrdinalEmbedder, BasicOrdinalEmbedder
 from .unet import OrdinalUNet, UNetConfig
 from .vae import SDVAE
