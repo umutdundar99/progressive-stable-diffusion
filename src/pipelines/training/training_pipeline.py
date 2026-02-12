@@ -32,7 +32,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     checkpoint_callback = ModelCheckpoint(
-        every_n_epochs=10,
+        every_n_epochs=32,
         save_last=False,
         save_top_k=-1,
         save_on_train_epoch_end=True,

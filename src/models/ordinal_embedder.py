@@ -7,8 +7,6 @@ and return a D-dimensional embedding vector via interpolation.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,139 +41,6 @@ def _linear_interpolate(
     return emb_lo * (1.0 - alpha) + emb_hi * alpha
 
 
-class BasicOrdinalEmbedder(nn.Module):
-    """
-    BOE (Basic Ordinal Embedding)
-    - Learns an embedding per discrete class
-    - Linearly interpolates between class vectors for real-valued labels
-    """
-
-    def __init__(
-        self,
-        num_classes: int,
-        embedding_dim: int,
-        padding_idx: Optional[int] = None,
-        init_std: float = 0.02,
-        learnable_null: bool = True,
-    ) -> None:
-        super().__init__()
-
-        if num_classes < 2:
-            raise ValueError("num_classes must be ≥ 2 for ordinal interpolation.")
-
-        self.num_classes = num_classes
-        self.embedding_dim = embedding_dim
-
-        self.embeddings = nn.Parameter(torch.empty(num_classes, embedding_dim))
-        nn.init.normal_(self.embeddings, mean=0.0, std=init_std)
-
-        if learnable_null:
-            self.null_embedding = nn.Parameter(torch.zeros(1, embedding_dim))
-        else:
-            self.register_buffer("null_embedding", torch.zeros(1, embedding_dim))
-
-        # OPTIONAL: zero out padding embedding
-        if padding_idx is not None:
-            with torch.no_grad():
-                self.embeddings[padding_idx].zero_()
-
-    def forward(
-        self,
-        labels: torch.Tensor,
-        is_training: bool = False,  # Kept for API consistency with AOE
-        unconditional: bool = False,
-        **kwargs,  # Accept but ignore extra args for compatibility
-    ) -> torch.Tensor:
-        """
-        Args:
-            labels: Tensor scalar or (...,) with values in [0, K-1]
-            is_training: Unused for BOE (no regularization noise)
-            unconditional: Return null embedding for CFG
-
-        Returns:
-            (..., D)
-        """
-        if unconditional:
-            batch_size = labels.shape[0] if labels.dim() > 0 else 1
-            return self.null_embedding.expand(batch_size, -1)
-
-        # Normalize scalar input
-        scalar_input = labels.dim() == 0
-        if scalar_input:
-            labels = labels.unsqueeze(0)
-
-        # Clamp into valid ordinal bounds
-        max_idx = self.num_classes - 1
-        labels = labels.to(self.embeddings.dtype)
-        labels = torch.clamp(labels, 0.0, float(max_idx))
-
-        # Compute bounds
-        lower = torch.floor(labels)
-        upper = torch.clamp(lower + 1, max=max_idx)
-        alpha = labels - lower
-
-        out = _linear_interpolate(
-            self.embeddings,
-            lower.long(),
-            upper.long(),
-            alpha,
-        )
-
-        return out.squeeze(0) if scalar_input else out
-
-    def get_negative_embedding(
-        self,
-        labels: torch.Tensor,
-        is_training: bool = False,
-    ) -> torch.Tensor:
-        """
-        Get negative conditioning embeddings with SMOOTH interpolation.
-
-        Per thesis Section 3.5:
-        - Mayo 0 (normal mucosa) contrasts against Mayo 1 features
-        - Mayo 1+ contrasts against Mayo 0 (healthy) features
-
-        To avoid discontinuity at intermediate values, we smoothly interpolate:
-        - At label=0: negative_label = 1.0 (contrast against mild disease)
-        - At label=1: negative_label = 0.0 (contrast against healthy)
-        - At label>=1: negative_label = 0.0 (contrast against healthy)
-
-        This creates smooth CFG guidance across the severity spectrum.
-
-        Args:
-            labels: Tensor of MES values in [0, K-1]
-            is_training: Whether in training mode
-
-        Returns:
-            Negative embeddings of shape (B, D)
-        """
-        scalar_input = labels.dim() == 0
-        if scalar_input:
-            labels = labels.unsqueeze(0)
-
-        # Smooth interpolation of negative labels:
-        # negative_label = max(0, 1 - label) for label in [0, 1]
-        # negative_label = 0 for label > 1
-        # This gives: label=0 -> neg=1, label=0.25 -> neg=0.75, label=0.5 -> neg=0.5, label=1+ -> neg=0
-        negative_labels = torch.clamp(1.0 - labels, min=0.0, max=1.0)
-
-        return self.forward(
-            negative_labels, is_training=is_training, unconditional=False
-        )
-
-    def log_embedding_stats(self) -> dict:
-        """Return embedding statistics for monitoring during training."""
-        with torch.no_grad():
-            emb = self.embeddings
-            return {
-                "embed/mean": emb.mean().item(),
-                "embed/std": emb.std().item(),
-                "embed/min": emb.min().item(),
-                "embed/max": emb.max().item(),
-                "embed/norm": emb.norm(dim=-1).mean().item(),
-            }
-
-
 class AdditiveOrdinalEmbedder(nn.Module):
     """
     AOE (Additive Ordinal Embedding)
@@ -194,6 +59,7 @@ class AdditiveOrdinalEmbedder(nn.Module):
         init_std: float = 0.02,
         delta_scale: float = 0.1,
         learnable_null: bool = True,
+        num_tokens: int = 16,
     ) -> None:
         super().__init__()
 
@@ -209,6 +75,15 @@ class AdditiveOrdinalEmbedder(nn.Module):
 
         self.deltas = nn.Parameter(torch.empty(num_classes - 1, embedding_dim))
         self._initialize_monotonic_deltas(init_std, delta_scale)
+
+        self.num_tokens = num_tokens
+
+        self.projector = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),
+            nn.GELU(),
+            nn.Linear(embedding_dim * 2, embedding_dim * num_tokens),
+        )
+        self.norm = nn.LayerNorm(embedding_dim * num_tokens)
 
         if learnable_null:
             self.null_embedding = nn.Parameter(torch.zeros(1, embedding_dim))
@@ -300,6 +175,9 @@ class AdditiveOrdinalEmbedder(nn.Module):
         if is_training and noise_std > 0:
             noise = torch.randn_like(out) * noise_std
             out = out + noise
+
+        out = self.projector(out)
+        out = out.view(-1, self.num_tokens, self.embedding_dim)
 
         return out.squeeze(0) if scalar_input else out
 

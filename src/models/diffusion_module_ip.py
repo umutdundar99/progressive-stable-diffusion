@@ -18,13 +18,13 @@ from typing import Any, Dict, Tuple
 import lightning as pl
 import torch
 import torch.nn.functional as F
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch import Tensor
 
 from .attention_processor import (
     set_ordinal_ip_attention_processors,
 )
 from .image_encoder import ImageEncoder, ImageProjection, ImageProjectionPlus
+from .lr_scheduler import LinearWarmupCosineAnnealingLR
 from .ordinal_embedder import AdditiveOrdinalEmbedder
 from .unet import OrdinalUNet, UNetConfig
 from .vae import SDVAE
@@ -46,10 +46,12 @@ class DiffusionIPConfig:
     noise_offset: float = 0.0
     input_perturbation: float = 0.0
     image_encoder_path: str = "openai/clip-vit-base-patch16"
-    num_image_tokens: int = 4
-    image_scale: float = 1.0
+    num_image_tokens: int = 16
+    num_aoe_tokens: int = 16
     use_frequency_strategy: bool = True
     use_image_projection_plus: bool = False
+    frequency_dominant_scale: float = 0.5
+    frequency_non_dominant_scale: float = 1.5
 
 
 class DiffusionModuleWithIP(pl.LightningModule):
@@ -86,11 +88,17 @@ class DiffusionModuleWithIP(pl.LightningModule):
             image_encoder_path=getattr(
                 cfg.model, "image_encoder_path", "openai/clip-vit-base-patch16"
             ),
-            num_image_tokens=getattr(cfg.model, "num_image_tokens", 4),
-            image_scale=getattr(cfg.model, "image_scale", 1.0),
-            use_frequency_strategy=getattr(cfg.model, "use_frequency_strategy", True),
+            num_image_tokens=getattr(cfg.model, "num_image_tokens", 16),
             use_image_projection_plus=getattr(
                 cfg.model, "use_image_projection_plus", False
+            ),
+            num_aoe_tokens=getattr(cfg.model, "num_aoe_tokens", 16),
+            use_frequency_strategy=getattr(cfg.model, "use_frequency_strategy", True),
+            frequency_dominant_scale=getattr(
+                cfg.diffusion, "frequency_dominant_scale", 0.5
+            ),
+            frequency_non_dominant_scale=getattr(
+                cfg.diffusion, "frequency_non_dominant_scale", 1.5
             ),
         )
 
@@ -133,6 +141,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
             num_classes=emb_cfg.num_classes,
             embedding_dim=cfg.model.embedding_dim,
             delta_scale=getattr(emb_cfg.aoe, "delta_scale", 0.1),
+            num_tokens=getattr(cfg.model, "num_aoe_tokens", 16),
         )
 
         # UNET (TRAINABLE)
@@ -176,17 +185,13 @@ class DiffusionModuleWithIP(pl.LightningModule):
         """Replace UNet attention processors with OrdinalIPAttnProcessors."""
         # Access the underlying diffusers UNet
         unet = self.unet.unet
-
-        frequency_dominant_scale = self.cfg.model["frequency_dominant_scale"]
-        frequency_non_dominant_scale = self.cfg.model["frequency_non_dominant_scale"]
-
         set_ordinal_ip_attention_processors(
             unet=unet,
-            num_tokens=self.diff_cfg.num_image_tokens,
-            scale=self.diff_cfg.image_scale,
+            num_image_tokens=self.diff_cfg.num_image_tokens,
+            num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
             use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
-            frequency_dominant_scale=frequency_dominant_scale,
-            frequency_non_dominant_scale=frequency_non_dominant_scale,
+            frequency_dominant_scale=self.diff_cfg.frequency_dominant_scale,
+            frequency_non_dominant_scale=self.diff_cfg.frequency_non_dominant_scale,
         )
 
     def _print_trainable_params(self) -> None:

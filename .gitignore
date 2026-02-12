@@ -214,3 +214,6 @@ markdowns
 ignore_scripts
 paper_outputs
 mes-classifier
+paper_outputs*
+wandb
+condition_images

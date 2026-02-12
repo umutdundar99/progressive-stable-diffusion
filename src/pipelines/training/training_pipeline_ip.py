@@ -36,6 +36,7 @@ def main(cfg: DictConfig) -> None:
         name=cfg.wandb.run_name,
         log_model=False,
         offline=cfg.wandb.offline,
+        group=cfg.wandb.get("group", None),
     )
 
     # Callbacks

@@ -790,9 +790,7 @@ def load_all_real_images(
             )
             num_loaded = len(real_images[class_idx])
             total_images += num_loaded
-            print(
-                f"  Loaded {num_loaded} real images for class {class_idx}"
-            )
+            print(f"  Loaded {num_loaded} real images for class {class_idx}")
         except Exception as e:
             print(f"  Warning: Could not load class {class_idx}: {e}")
             real_images[class_idx] = None
@@ -913,16 +911,26 @@ def log_results_to_wandb(
     # Log overall metrics
     metrics = {
         f"{model_name}/guidance_{guidance_scale}/fid": results.get("overall_fid", -1),
-        f"{model_name}/guidance_{guidance_scale}/is_mean": results.get("overall_is_mean", -1),
-        f"{model_name}/guidance_{guidance_scale}/is_std": results.get("overall_is_std", -1),
-        f"{model_name}/guidance_{guidance_scale}/lpips_diversity": results.get("overall_lpips_diversity", -1),
+        f"{model_name}/guidance_{guidance_scale}/is_mean": results.get(
+            "overall_is_mean", -1
+        ),
+        f"{model_name}/guidance_{guidance_scale}/is_std": results.get(
+            "overall_is_std", -1
+        ),
+        f"{model_name}/guidance_{guidance_scale}/lpips_diversity": results.get(
+            "overall_lpips_diversity", -1
+        ),
         f"{model_name}/guidance_{guidance_scale}/ssim": results.get("overall_ssim", -1),
     }
 
     # Log per-class metrics
     for class_idx, class_metrics in results.get("per_class", {}).items():
-        metrics[f"{model_name}/guidance_{guidance_scale}/fid_class_{class_idx}"] = class_metrics.get("fid", -1)
-        metrics[f"{model_name}/guidance_{guidance_scale}/ssim_class_{class_idx}"] = class_metrics.get("ssim", -1)
+        metrics[f"{model_name}/guidance_{guidance_scale}/fid_class_{class_idx}"] = (
+            class_metrics.get("fid", -1)
+        )
+        metrics[f"{model_name}/guidance_{guidance_scale}/ssim_class_{class_idx}"] = (
+            class_metrics.get("ssim", -1)
+        )
 
     wandb.log(metrics)
 

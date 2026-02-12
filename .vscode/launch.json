@@ -15,25 +15,25 @@
       "name": "Inference Diffusion",
       "type": "python",
       "request": "launch",
-      "program": "${workspaceFolder}/src/pipelines/inference_pipeline_ip.py",
+      "program": "${workspaceFolder}/src/pipelines/inference/inference_pipeline_ip_p2p.py",
       "console": "integratedTerminal",
       "env": {
       "PYTHONPATH": "${workspaceFolder}"
       },
       "args": [
       //"--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/8dituazg_4th_try_noblur_all_same_weight/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
-      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/pvq7gpe7/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation-ip/sr9ies9q_without_blur/checkpoints/last.ckpt",
       "--config", "configs/train_ip.yaml",
       "--sampling-steps", "50",
-      "--mes-steps", "20",
+      "--mes-steps", "13",
       "--output-dir", "paper_outputs/pvq7gpe7_1_149_3scale",
-      // "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/0/UC_patient_40_7.bmp",
-      //"--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/1/UC_patient_448_54.bmp",
-      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_copy/test/0/UC_patient_9_6.bmp",
-      //"--no-blur",
-      "--image-scale", "0",
-      "--guidance-scale", "3"
+      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_copy/test/3/UC_patient_199_47.bmp",
+      "--no-blur",
+      "--image-scale", "1",
+      "--guidance-scale", "3",
+      "--input-mayo", "3.0"
       ]
+
     },
      {
       "name": "Inference Diffusion Data Augment",

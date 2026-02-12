@@ -18,14 +18,14 @@ model:
   pretrained_unet_path: "CompVis/stable-diffusion-v1-4"
   image_encoder_path: "openai/clip-vit-large-patch14"
   num_image_tokens: 16
-  image_scale: 1.0
-  use_frequency_strategy: true
+  num_aoe_tokens: 16
   use_image_projection_plus: true
   blur_kernel_size: 11
   blur_sigma: 15.0
 
-  frequency_dominant_scale: 0.5
-  frequency_non_dominant_scale: 1.5
+  use_frequency_strategy: true
+  frequency_dominant_scale: 1.5
+  frequency_non_dominant_scale: 0.5
 
   ordinal_embedder:
     type: "aoe"
@@ -48,8 +48,8 @@ scheduler:
 
 dataset:
   dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_copy
-  batch_size: 32
-  num_workers: 22
+  batch_size: 64
+  num_workers: 24
   persistent_workers: true
   prefetch_factor: 2
   image_size: 256
@@ -67,7 +67,7 @@ training:
   max_epochs: 150
   log_every_n_steps: 50
   gradient_clip_val: 1.0
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 1
   precision: "16-mixed"
   accelerator: "gpu"
   devices: 1
@@ -85,7 +85,8 @@ training:
 
 wandb:
   project: "prog-disease-generation-ip"
-  run_name: "dominant_1_nondominant_1_aoe_noblur_ip"
+  group: "p2p-ip"
+  run_name: "dominant_15_nondominant_05_without_contrastive_loss"
   log_samples_every_n_steps: 50
   offline: False
 

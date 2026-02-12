@@ -22,6 +22,44 @@ from transformers import CLIPImageProcessor
 from src.models.diffusion_module_ip import DiffusionModuleWithIP
 
 
+def _load_leace_projection(leace_path: Path, device: torch.device) -> dict:
+    """Load a pre-computed LEACE projection matrix."""
+    data = torch.load(leace_path, map_location="cpu", weights_only=True)
+    data["P_null"] = data["P_null"].to(device)
+    data["mu"] = data["mu"].to(device)
+    print(
+        f"Loaded LEACE projection (rank={data['rank']}, "
+        f"tokens={data['num_tokens']}, dim={data['token_dim']})"
+    )
+    return data
+
+
+def _apply_leace(image_embeds: Tensor, leace: dict) -> Tensor:
+    """
+    Apply LEACE projection to erase disease information from image embeddings.
+
+    Args:
+        image_embeds: (B, num_tokens, D)
+        leace: dict with P_null (T*D, T*D), mu (T*D,)
+
+    Returns:
+        Cleaned image embeddings (B, num_tokens, D)
+    """
+    B, T, D = image_embeds.shape
+    P_null = leace["P_null"].to(device=image_embeds.device, dtype=image_embeds.dtype)
+    mu = leace["mu"].to(device=image_embeds.device, dtype=image_embeds.dtype)
+
+    # Flatten tokens: (B, T*D)
+    flat = image_embeds.reshape(B, T * D)
+
+    # Center, project, un-center
+    flat_centered = flat - mu.unsqueeze(0)
+    flat_projected = flat_centered @ P_null.T
+    flat_clean = flat_projected + mu.unsqueeze(0)
+
+    return flat_clean.reshape(B, T, D)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate MES progression with patient-specific anatomical structure."
@@ -95,15 +133,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-blur",
         action="store_true",
-        default=False,  # Changed: use raw images by default (no blur)
+        default=False,
         help="Skip blurring the structure image (use raw image features).",
     )
+    parser.add_argument(
+        "--input-mayo",
+        type=float,
+        default=0.0,
+        help="Mayo score for the input structure image (used for AOE conditioning).",
+    )
+
     parser.add_argument(
         "--zero-image",
         action="store_true",
         default=False,
         help="Use zero image conditioning (c_img=0). Only AOE ordinal conditioning active. "
         "This is useful for testing progression without patient-specific features.",
+    )
+    parser.add_argument(
+        "--leace",
+        type=Path,
+        default=None,
+        help="Path to a LEACE projection .pt file (from scripts/compute_leace_projection.py). "
+        "When provided, disease information is erased from image embeddings before conditioning.",
     )
     return parser.parse_args()
 
@@ -177,7 +229,9 @@ def _load_and_preprocess_structure_image(
     blurred_pil = transforms.ToPILImage()(display_tensor)
 
     clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
-    clip_inputs = clip_processor(images=blurred_pil, return_tensors="pt")
+    clip_inputs = clip_processor(
+        images=blurred_pil, return_tensors="pt", do_rescale=True
+    )
     structure_tensor = clip_inputs.pixel_values.to(device)
 
     return structure_tensor, display_tensor
@@ -225,6 +279,7 @@ def _prepare_conditioning(
     structure_image: Tensor,
     is_unconditional: bool = False,
     image_scale: float = 1.0,
+    leace: Optional[dict] = None,
 ) -> Tensor:
     """
     Prepare combined AOE + Image conditioning embeddings.
@@ -235,9 +290,10 @@ def _prepare_conditioning(
         structure_image: CLIP-preprocessed structure image (1, 3, 224, 224)
         is_unconditional: If True, use zero image embeddings for CFG
         image_scale: Scale factor for image conditioning strength
+        leace: Optional LEACE projection dict to erase disease from image embeds
 
     Returns:
-        Combined embeddings (B, 1 + num_image_tokens, D)
+        Combined embeddings (B, num_aoe_tokens + num_image_tokens, D)
     """
     batch_size = labels.shape[0]
     device = labels.device
@@ -267,6 +323,10 @@ def _prepare_conditioning(
         structure_batch = structure_image.expand(batch_size, -1, -1, -1)
         image_embeds = module._get_image_embeds(structure_batch)  # (B, num_tokens, D)
 
+        # Apply LEACE: erase disease information from image embeddings
+        if leace is not None:
+            image_embeds = _apply_leace(image_embeds, leace)
+
         # Apply image scale to control conditioning strength
         if image_scale != 1.0:
             image_embeds = image_embeds * image_scale
@@ -286,6 +346,8 @@ def _ddim_sample_ip(
     eta: float = 0.0,
     guidance_scale: float = 2.0,
     image_scale: float = 1.0,
+    input_mayo: float = 0.0,
+    leace: Optional[dict] = None,
 ) -> Tensor:
     """
     DDIM sampling with IP-Adapter conditioning.
@@ -334,25 +396,143 @@ def _ddim_sample_ip(
         device=device,
     )
 
+    pre_switch_labels = torch.full_like(labels, input_mayo)
+
+    pre_switch_cond_embed = _prepare_conditioning(
+        module,
+        pre_switch_labels,
+        structure_image,
+        is_unconditional=False,
+        image_scale=image_scale,
+        leace=leace,
+    )
+    pre_switch_uncond_embed = _prepare_conditioning(
+        module,
+        pre_switch_labels,
+        structure_image,
+        is_unconditional=True,
+        image_scale=image_scale,
+        leace=leace,
+    )
+
     # Prepare conditional and unconditional embeddings
     cond_embed = _prepare_conditioning(
-        module, labels, structure_image, is_unconditional=False, image_scale=image_scale
+        module,
+        labels,
+        structure_image,
+        is_unconditional=False,
+        image_scale=image_scale,
+        leace=leace,
     )
     uncond_embed = _prepare_conditioning(
-        module, labels, structure_image, is_unconditional=True, image_scale=image_scale
+        module,
+        labels,
+        structure_image,
+        is_unconditional=True,
+        image_scale=image_scale,
+        leace=leace,
+    )
+
+    pre_switch_embed = torch.cat(
+        [pre_switch_uncond_embed, pre_switch_cond_embed], dim=0
     )
 
     # CFG: concat unconditional + conditional
-    embed = torch.cat([uncond_embed, cond_embed], dim=0)  # (2*B, seq, D)
+    embed = torch.cat([uncond_embed, cond_embed], dim=0)
 
-    # DDIM loop
+    # Save initial noise – both passes MUST start from the same latents
+    initial_latents = latents.clone()
+
+    # ───────────────────────────────────────────────────────────────
+    # PASS 1  (source):  Run with input_mayo conditioning.
+    #         p2p_inject_maps = False → attention maps are STORED.
+    # ───────────────────────────────────────────────────────────────
+    # Clear any leftover attention stores
+    for _, proc in module.unet.unet.attn_processors.items():
+        if hasattr(proc, "clear_attention_store"):
+            proc.clear_attention_store()
+
     for i, t_scalar in enumerate(timesteps):
         t_int = int(t_scalar.item())
         t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
 
+        # Set per-step index & disable injection (store mode)
+        for _, proc in module.unet.unet.attn_processors.items():
+            if hasattr(proc, "set_step_idx"):
+                proc.set_step_idx(i)
+            if hasattr(proc, "set_p2p_switch_flag"):
+                proc.set_p2p_switch_flag(False)
+
         # Duplicate latents for CFG
-        latent_model_input = torch.cat([latents, latents], dim=0)  # (2*B, 4, H, W)
-        t_model_input = torch.cat([t, t], dim=0)  # (2*B,)
+        latent_model_input = torch.cat([latents, latents], dim=0)
+        t_model_input = torch.cat([t, t], dim=0)
+
+        # Predict noise
+        noise_pred = module(latent_model_input, t_model_input, pre_switch_embed)
+
+        # CFG
+        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+        eps_theta = noise_pred_uncond + guidance_scale * (
+            noise_pred_cond - noise_pred_uncond
+        )
+
+        # DDIM update
+        alpha_bar_t = alphas_cumprod[t_int].to(device=device, dtype=latents.dtype)
+        sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
+        sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - alpha_bar_t)
+
+        # Predict x0
+        x0_pred = (latents - sqrt_one_minus_alpha_bar_t * eps_theta) / sqrt_alpha_bar_t
+        x0_pred = x0_pred.clamp(-4.0, 4.0)
+
+        if i == sampling_steps - 1:
+            latents = x0_pred
+            continue
+
+        t_prev_int = int(timesteps[i + 1].item())
+        alpha_bar_prev = alphas_cumprod[t_prev_int].to(
+            device=device, dtype=latents.dtype
+        )
+        sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
+        sqrt_one_minus_alpha_bar_prev = torch.sqrt(1.0 - alpha_bar_prev)
+
+        if eta == 0.0:
+            latents = (
+                sqrt_alpha_bar_prev * x0_pred
+                + sqrt_one_minus_alpha_bar_prev * eps_theta
+            )
+        else:
+            sigma = eta * torch.sqrt(
+                (1 - alpha_bar_prev)
+                / (1 - alpha_bar_t)
+                * (1 - alpha_bar_t / alpha_bar_prev)
+            )
+            noise = torch.randn_like(latents)
+            latents = (
+                sqrt_alpha_bar_prev * x0_pred
+                + torch.sqrt(1 - alpha_bar_prev - sigma**2) * eps_theta
+                + sigma * noise
+            )
+
+    latents = initial_latents.clone()
+
+    switch_attn_maps_steps = set(range(min(15, sampling_steps)))
+
+    for i, t_scalar in enumerate(timesteps):
+        t_int = int(t_scalar.item())
+        t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
+
+        # Set per-step index & injection flag
+        inject = i in switch_attn_maps_steps
+        for _, proc in module.unet.unet.attn_processors.items():
+            if hasattr(proc, "set_step_idx"):
+                proc.set_step_idx(i)
+            if hasattr(proc, "set_p2p_switch_flag"):
+                proc.set_p2p_switch_flag(inject)
+
+        # Duplicate latents for CFG
+        latent_model_input = torch.cat([latents, latents], dim=0)
+        t_model_input = torch.cat([t, t], dim=0)
 
         # Predict noise
         noise_pred = module(latent_model_input, t_model_input, embed)
@@ -370,14 +550,12 @@ def _ddim_sample_ip(
 
         # Predict x0
         x0_pred = (latents - sqrt_one_minus_alpha_bar_t * eps_theta) / sqrt_alpha_bar_t
-        x0_pred = x0_pred.clamp(-4.0, 4.0)  # Stability clipping
+        x0_pred = x0_pred.clamp(-4.0, 4.0)
 
-        # Final step: return x0 directly
         if i == sampling_steps - 1:
             latents = x0_pred
             continue
 
-        # Get alpha_bar for previous timestep
         t_prev_int = int(timesteps[i + 1].item())
         alpha_bar_prev = alphas_cumprod[t_prev_int].to(
             device=device, dtype=latents.dtype
@@ -386,13 +564,11 @@ def _ddim_sample_ip(
         sqrt_one_minus_alpha_bar_prev = torch.sqrt(1.0 - alpha_bar_prev)
 
         if eta == 0.0:
-            # Deterministic DDIM
             latents = (
                 sqrt_alpha_bar_prev * x0_pred
                 + sqrt_one_minus_alpha_bar_prev * eps_theta
             )
         else:
-            # Stochastic DDIM
             sigma = eta * torch.sqrt(
                 (1 - alpha_bar_prev)
                 / (1 - alpha_bar_t)
@@ -404,6 +580,11 @@ def _ddim_sample_ip(
                 + torch.sqrt(1 - alpha_bar_prev - sigma**2) * eps_theta
                 + sigma * noise
             )
+
+    # Disable injection after sampling
+    for _, proc in module.unet.unet.attn_processors.items():
+        if hasattr(proc, "set_p2p_switch_flag"):
+            proc.set_p2p_switch_flag(False)
 
     return latents
 
@@ -537,6 +718,7 @@ def main() -> None:
     module = DiffusionModuleWithIP.load_from_checkpoint(
         str(args.checkpoint),
         cfg=cfg,
+        weights_only=False,
     )
     module = module.to(device)
     module = module.to(torch.float32)
@@ -576,6 +758,12 @@ def main() -> None:
     else:
         effective_image_scale = args.image_scale
 
+    # Load LEACE projection if provided
+    leace = None
+    if args.leace is not None:
+        leace = _load_leace_projection(args.leace, device)
+        print(f"🧹 LEACE disease erasure active (rank={leace['rank']})")
+
     # Generate
     with torch.no_grad():
         latents = _ddim_sample_ip(
@@ -587,6 +775,8 @@ def main() -> None:
             eta=args.eta,
             guidance_scale=args.guidance_scale,
             image_scale=effective_image_scale,
+            input_mayo=args.input_mayo,
+            leace=leace,
         )
 
         images = _latents_to_images(module, latents)
