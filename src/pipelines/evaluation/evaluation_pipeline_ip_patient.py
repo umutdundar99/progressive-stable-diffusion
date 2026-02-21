@@ -88,7 +88,6 @@ class PatientEvaluationConfig:
 
     checkpoint_path: str
     checkpoint_name: str
-    guidance_scale: float
     image_scale: float
     num_patients_per_class: int
     sampling_steps: int
@@ -161,12 +160,6 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/evaluation_ip_patient"),
         help="Directory where evaluation results are saved.",
-    )
-    parser.add_argument(
-        "--guidance-scale",
-        type=float,
-        default=3.0,
-        help="CFG guidance scale (use best from zero-cond eval).",
     )
     parser.add_argument(
         "--image-scale",
@@ -353,35 +346,23 @@ def _prepare_conditioning(
     module: DiffusionModuleWithIP,
     labels: Tensor,
     structure_image: Tensor,
-    is_unconditional: bool = False,
     image_scale: float = 1.0,
 ) -> Tensor:
-    """Prepare combined AOE + Image conditioning embeddings."""
+    """Prepare combined AOE + Image conditioning embeddings.
+
+    Returns (B, S, D) with segments [aoe_embeds | image_embeds].
+    """
     batch_size = labels.shape[0]
-    device = labels.device
 
-    if is_unconditional:
-        aoe_embeds = module.ordinal_embedder.get_negative_embedding(
-            labels, is_training=False
-        )
-    else:
-        aoe_embeds = module.ordinal_embedder(labels, is_training=False)
-
+    aoe_embeds = module.ordinal_embedder(labels, is_training=False)
     if aoe_embeds.dim() == 2:
         aoe_embeds = aoe_embeds.unsqueeze(1)
 
-    if is_unconditional:
-        num_tokens = module.diff_cfg.num_image_tokens
-        cross_dim = module.cfg.model.conditioning_dim
-        image_embeds = torch.zeros(
-            batch_size, num_tokens, cross_dim, device=device, dtype=aoe_embeds.dtype
-        )
-    else:
-        structure_batch = structure_image.expand(batch_size, -1, -1, -1)
-        image_embeds = module._get_image_embeds(structure_batch)
+    structure_batch = structure_image.expand(batch_size, -1, -1, -1)
+    image_embeds = module._get_image_embeds(structure_batch)
 
-        if image_scale != 1.0:
-            image_embeds = image_embeds * image_scale
+    if image_scale != 1.0:
+        image_embeds = image_embeds * image_scale
 
     return torch.cat([aoe_embeds, image_embeds], dim=1)
 
@@ -393,11 +374,13 @@ def ddim_sample_with_image_condition(
     sampling_steps: int,
     device: torch.device,
     eta: float = 0.0,
-    guidance_scale: float = 3.0,
     image_scale: float = 1.0,
 ) -> Tensor:
     """
     DDIM sampling WITH image conditioning for patient-specific generation.
+
+    Single conditional pass — no CFG. Disease control is handled entirely
+    by attention-level steering (dynamic gates + delta pathway).
 
     Args:
         module: DiffusionModuleWithIP
@@ -406,7 +389,6 @@ def ddim_sample_with_image_condition(
         sampling_steps: Number of DDIM steps
         device: Target device
         eta: DDIM stochasticity
-        guidance_scale: CFG scale
         image_scale: Image conditioning strength
 
     Returns:
@@ -437,32 +419,15 @@ def ddim_sample_with_image_condition(
         device=device,
     )
 
-    # Prepare embeddings WITH image conditioning
-    cond_embed = _prepare_conditioning(
-        module, labels, structure_image, is_unconditional=False, image_scale=image_scale
+    embed = _prepare_conditioning(
+        module, labels, structure_image, image_scale=image_scale
     )
-    uncond_embed = _prepare_conditioning(
-        module, labels, structure_image, is_unconditional=True, image_scale=image_scale
-    )
-
-    embed = torch.cat([uncond_embed, cond_embed], dim=0)
 
     for i, t_scalar in enumerate(timesteps):
         t_int = int(t_scalar.item())
         t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
 
-        latent_model_input = torch.cat([latents, latents], dim=0)
-        t_model_input = torch.cat([t, t], dim=0)
-
-        noise_pred = module(latent_model_input, t_model_input, embed)
-        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-
-        if guidance_scale > 0:
-            eps_theta = noise_pred_uncond + guidance_scale * (
-                noise_pred_cond - noise_pred_uncond
-            )
-        else:
-            eps_theta = noise_pred_cond
+        eps_theta = module(latents, t, embed)
 
         alpha_bar_t = alphas_cumprod[t_int].to(device=device, dtype=latents.dtype)
         sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
@@ -584,7 +549,6 @@ def generate_patient_progression(
     mes_steps: int,
     sampling_steps: int,
     device: torch.device,
-    guidance_scale: float = 3.0,
     image_scale: float = 1.0,
     apply_blur: bool = True,
 ) -> Tuple[Tensor, Dict[str, Any]]:
@@ -597,7 +561,6 @@ def generate_patient_progression(
         mes_steps: Number of MES levels to generate
         sampling_steps: DDIM steps
         device: Compute device
-        guidance_scale: CFG scale
         image_scale: Image conditioning strength
         apply_blur: Whether to blur the structure image
 
@@ -619,7 +582,6 @@ def generate_patient_progression(
             structure_image=structure_image,
             sampling_steps=sampling_steps,
             device=device,
-            guidance_scale=guidance_scale,
             image_scale=image_scale,
         )
         generated = latents_to_images(module, latents)
@@ -654,7 +616,7 @@ def evaluate_model_patient_conditioned(
     """
     print(f"\n{'='*60}")
     print(f"Evaluating: {model_name}")
-    print(f"  Guidance Scale: {config.guidance_scale}")
+    print("  Guidance Scale: removed (attention-level steering)")
     print(f"  Image Scale: {config.image_scale}")
     print(f"  Apply Blur: {apply_blur}")
     print(f"{'='*60}")
@@ -695,7 +657,6 @@ def evaluate_model_patient_conditioned(
                 mes_steps=config.mes_steps,
                 sampling_steps=config.sampling_steps,
                 device=device,
-                guidance_scale=config.guidance_scale,
                 image_scale=config.image_scale,
                 apply_blur=apply_blur,
             )
@@ -730,7 +691,6 @@ def evaluate_model_patient_conditioned(
     return {
         "model_name": model_name,
         "config": {
-            "guidance_scale": config.guidance_scale,
             "image_scale": config.image_scale,
             "sampling_steps": config.sampling_steps,
             "mes_steps": config.mes_steps,
@@ -845,7 +805,6 @@ def main() -> None:
         eval_config = PatientEvaluationConfig(
             checkpoint_path=str(model_cfg["checkpoint"]),
             checkpoint_name=model_cfg["name"],
-            guidance_scale=args.guidance_scale,
             image_scale=args.image_scale,
             num_patients_per_class=args.num_patients_per_class,
             sampling_steps=args.sampling_steps,

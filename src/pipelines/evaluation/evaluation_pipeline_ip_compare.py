@@ -97,7 +97,6 @@ class EvaluationConfig:
 
     checkpoint_path: str
     checkpoint_name: str
-    guidance_scales: List[float]
     num_samples_per_class: int
     sampling_steps: int
     batch_size: int
@@ -171,13 +170,6 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/evaluation_ip_compare"),
         help="Directory where evaluation results are saved.",
-    )
-    parser.add_argument(
-        "--guidance-scales",
-        type=float,
-        nargs="+",
-        default=[0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5],
-        help="List of guidance scales to evaluate.",
     )
     parser.add_argument(
         "--num-samples-per-class",
@@ -353,13 +345,12 @@ def _ddim_sample_unconditioned(
     sampling_steps: int,
     device: torch.device,
     eta: float = 0.0,
-    guidance_scale: float = 0.0,
 ) -> Tensor:
     """
     DDIM sampling WITHOUT image conditioning (unconditioned generation).
 
-    For comparing models on their ability to generate realistic images
-    based only on class labels (MES scores).
+    Single conditional pass — no CFG. Disease control is handled entirely
+    by attention-level steering (dynamic gates + delta pathway).
 
     Args:
         module: DiffusionModuleWithIP
@@ -367,7 +358,6 @@ def _ddim_sample_unconditioned(
         sampling_steps: Number of DDIM steps
         device: Target device
         eta: DDIM stochasticity
-        guidance_scale: CFG scale for class conditioning
 
     Returns:
         Generated latents (B, 4, H//8, W//8)
@@ -398,17 +388,9 @@ def _ddim_sample_unconditioned(
     )
 
     # Prepare conditioning embeddings (no image, only AOE for class)
-    # AOE embeddings for class conditioning
     aoe_cond = module.ordinal_embedder(labels, is_training=False)
     if aoe_cond.dim() == 2:
         aoe_cond = aoe_cond.unsqueeze(1)  # (B, 1, D)
-
-    # Unconditional AOE (for CFG)
-    aoe_uncond = module.ordinal_embedder.get_negative_embedding(
-        labels, is_training=False
-    )
-    if aoe_uncond.dim() == 2:
-        aoe_uncond = aoe_uncond.unsqueeze(1)  # (B, 1, D)
 
     # Zero image embeddings (unconditioned on image)
     num_tokens = module.diff_cfg.num_image_tokens
@@ -418,34 +400,14 @@ def _ddim_sample_unconditioned(
     )
 
     # Combine: [AOE, Zero Image]
-    cond_embed = torch.cat([aoe_cond, zero_image_embeds], dim=1)
-    uncond_embed = torch.cat([aoe_uncond, zero_image_embeds], dim=1)
-
-    # CFG: concat unconditional + conditional
-    embed = torch.cat([uncond_embed, cond_embed], dim=0)  # (2*B, seq, D)
+    embed = torch.cat([aoe_cond, zero_image_embeds], dim=1)
 
     # DDIM loop
     for i, t_scalar in enumerate(timesteps):
         t_int = int(t_scalar.item())
         t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
 
-        # Duplicate latents for CFG
-        latent_model_input = torch.cat([latents, latents], dim=0)
-        t_model_input = torch.cat([t, t], dim=0)
-
-        # Predict noise
-        noise_pred = module(latent_model_input, t_model_input, embed)
-
-        # CFG
-        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-
-        if guidance_scale > 0:
-            eps_theta = noise_pred_uncond + guidance_scale * (
-                noise_pred_cond - noise_pred_uncond
-            )
-        else:
-            # No guidance - use only conditional prediction
-            eps_theta = noise_pred_cond
+        eps_theta = module(latents, t, embed)
 
         # DDIM update
         alpha_bar_t = alphas_cumprod[t_int].to(device=device, dtype=latents.dtype)
@@ -515,7 +477,6 @@ def generate_samples_for_class(
     batch_size: int,
     sampling_steps: int,
     device: torch.device,
-    guidance_scale: float = 0.0,
     eta: float = 0.0,
 ) -> Tensor:
     """Generate samples for a specific class label without image conditioning."""
@@ -535,7 +496,6 @@ def generate_samples_for_class(
                 sampling_steps=sampling_steps,
                 device=device,
                 eta=eta,
-                guidance_scale=guidance_scale,
             )
             images = _latents_to_images(module, latents)
 
@@ -656,16 +616,10 @@ def save_images(
     images: Tensor,
     output_dir: Path,
     class_idx: int,
-    guidance_scale: float,
     model_name: str,
 ) -> None:
     """Save generated images to disk."""
-    save_dir = (
-        output_dir
-        / model_name
-        / f"guidance_{guidance_scale:.1f}"
-        / f"class_{class_idx}"
-    )
+    save_dir = output_dir / model_name / f"class_{class_idx}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, image in enumerate(images):
@@ -675,20 +629,18 @@ def save_images(
         pil_image.save(filename)
 
 
-def evaluate_model_with_guidance(
+def evaluate_model(
     module: DiffusionModuleWithIP,
     model_name: str,
-    guidance_scale: float,
     real_images_by_class: Dict[int, Tensor],
     config: EvaluationConfig,
     device: torch.device,
     output_dir: Path,
     save_images_flag: bool = False,
 ) -> Dict[str, Any]:
-    """Evaluate a single model with a specific guidance scale."""
+    """Evaluate a single model (no guidance scale sweep)."""
     results = {
         "model_name": model_name,
-        "guidance_scale": guidance_scale,
         "num_samples_per_class": config.num_samples_per_class,
         "sampling_steps": config.sampling_steps,
         "per_class": {},
@@ -708,14 +660,13 @@ def evaluate_model_with_guidance(
             batch_size=config.batch_size,
             sampling_steps=config.sampling_steps,
             device=device,
-            guidance_scale=guidance_scale,
             eta=config.eta,
         )
 
         real_images = real_images_by_class.get(class_idx)
 
         if save_images_flag:
-            save_images(fake_images, output_dir, class_idx, guidance_scale, model_name)
+            save_images(fake_images, output_dir, class_idx, model_name)
 
         # Per-class metrics
         class_metrics = {}
@@ -807,7 +758,6 @@ def create_comparison_report(
     for r in results:
         row = {
             "Model": r["model_name"],
-            "Guidance": r["guidance_scale"],
             "FID": r.get("overall_fid", -1),
             "IS Mean": r.get("overall_is_mean", -1),
             "IS Std": r.get("overall_is_std", -1),
@@ -821,8 +771,8 @@ def create_comparison_report(
 
     df = pd.DataFrame(rows)
 
-    # Sort by model and guidance scale
-    df = df.sort_values(["Model", "Guidance"])
+    # Sort by model
+    df = df.sort_values(["Model"])
 
     # Save to CSV
     csv_path = output_dir / "comparison_results.csv"
@@ -844,9 +794,7 @@ def print_comparison_summary(df: pd.DataFrame) -> None:
         model_df = df[df["Model"] == model]
         best_fid_row = model_df.loc[model_df["FID"].idxmin()]
         print(f"\n{model}:")
-        print(
-            f"  Best FID: {best_fid_row['FID']:.2f} (guidance={best_fid_row['Guidance']})"
-        )
+        print(f"  FID: {best_fid_row['FID']:.2f}")
         print(f"  IS: {best_fid_row['IS Mean']:.2f} ± {best_fid_row['IS Std']:.2f}")
         print(f"  LPIPS Diversity: {best_fid_row['LPIPS Div']:.4f}")
 
@@ -855,7 +803,6 @@ def print_comparison_summary(df: pd.DataFrame) -> None:
     print("OVERALL BEST (Lowest FID):")
     best_overall = df.loc[df["FID"].idxmin()]
     print(f"  Model: {best_overall['Model']}")
-    print(f"  Guidance: {best_overall['Guidance']}")
     print(f"  FID: {best_overall['FID']:.2f}")
     print("=" * 80)
 
@@ -880,7 +827,6 @@ def init_wandb(
         project=args.wandb_project,
         name=run_name,
         config={
-            "guidance_scales": args.guidance_scales,
             "num_samples_per_class": args.num_samples_per_class,
             "sampling_steps": args.sampling_steps,
             "batch_size": args.batch_size,
@@ -906,31 +852,20 @@ def log_results_to_wandb(
         return
 
     model_name = results["model_name"]
-    guidance_scale = results["guidance_scale"]
 
     # Log overall metrics
     metrics = {
-        f"{model_name}/guidance_{guidance_scale}/fid": results.get("overall_fid", -1),
-        f"{model_name}/guidance_{guidance_scale}/is_mean": results.get(
-            "overall_is_mean", -1
-        ),
-        f"{model_name}/guidance_{guidance_scale}/is_std": results.get(
-            "overall_is_std", -1
-        ),
-        f"{model_name}/guidance_{guidance_scale}/lpips_diversity": results.get(
-            "overall_lpips_diversity", -1
-        ),
-        f"{model_name}/guidance_{guidance_scale}/ssim": results.get("overall_ssim", -1),
+        f"{model_name}/fid": results.get("overall_fid", -1),
+        f"{model_name}/is_mean": results.get("overall_is_mean", -1),
+        f"{model_name}/is_std": results.get("overall_is_std", -1),
+        f"{model_name}/lpips_diversity": results.get("overall_lpips_diversity", -1),
+        f"{model_name}/ssim": results.get("overall_ssim", -1),
     }
 
     # Log per-class metrics
     for class_idx, class_metrics in results.get("per_class", {}).items():
-        metrics[f"{model_name}/guidance_{guidance_scale}/fid_class_{class_idx}"] = (
-            class_metrics.get("fid", -1)
-        )
-        metrics[f"{model_name}/guidance_{guidance_scale}/ssim_class_{class_idx}"] = (
-            class_metrics.get("ssim", -1)
-        )
+        metrics[f"{model_name}/fid_class_{class_idx}"] = class_metrics.get("fid", -1)
+        metrics[f"{model_name}/ssim_class_{class_idx}"] = class_metrics.get("ssim", -1)
 
     wandb.log(metrics)
 
@@ -950,7 +885,6 @@ def log_final_summary_to_wandb(
     # Find and log best results
     best_overall = df.loc[df["FID"].idxmin()]
     wandb.run.summary["best_model"] = best_overall["Model"]
-    wandb.run.summary["best_guidance"] = best_overall["Guidance"]
     wandb.run.summary["best_fid"] = best_overall["FID"]
     wandb.run.summary["best_is_mean"] = best_overall["IS Mean"]
     wandb.run.summary["best_lpips_div"] = best_overall["LPIPS Div"]
@@ -966,7 +900,6 @@ def main() -> None:
 
     # Quick test mode
     if args.quick_test:
-        args.guidance_scales = [0.0, 1.0, 2.0]
         args.num_samples_per_class = 10
         print("Running in quick test mode with reduced samples")
 
@@ -974,7 +907,6 @@ def main() -> None:
     _set_seed(args.seed)
 
     print(f"Device: {device}")
-    print(f"Guidance scales to test: {args.guidance_scales}")
 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1037,38 +969,33 @@ def main() -> None:
         # Load model with correct frequency scales
         module = load_model(ckpt_path, cfg, device, freq_dom, freq_non)
 
-        for guidance_scale in args.guidance_scales:
-            print(f"\n  Guidance scale: {guidance_scale}")
+        eval_config = EvaluationConfig(
+            checkpoint_path=str(ckpt_path),
+            checkpoint_name=model_name,
+            num_samples_per_class=args.num_samples_per_class,
+            sampling_steps=args.sampling_steps,
+            batch_size=args.batch_size,
+            num_classes=args.num_classes,
+        )
 
-            eval_config = EvaluationConfig(
-                checkpoint_path=str(ckpt_path),
-                checkpoint_name=model_name,
-                guidance_scales=[guidance_scale],
-                num_samples_per_class=args.num_samples_per_class,
-                sampling_steps=args.sampling_steps,
-                batch_size=args.batch_size,
-                num_classes=args.num_classes,
-            )
+        results = evaluate_model(
+            module=module,
+            model_name=model_name,
+            real_images_by_class=real_images_by_class,
+            config=eval_config,
+            device=device,
+            output_dir=output_dir,
+            save_images_flag=args.save_images,
+        )
 
-            results = evaluate_model_with_guidance(
-                module=module,
-                model_name=model_name,
-                guidance_scale=guidance_scale,
-                real_images_by_class=real_images_by_class,
-                config=eval_config,
-                device=device,
-                output_dir=output_dir,
-                save_images_flag=args.save_images,
-            )
+        all_results.append(results)
 
-            all_results.append(results)
+        # Print intermediate results
+        print(f"    Overall FID: {results.get('overall_fid', -1):.2f}")
+        print(f"    Overall IS: {results.get('overall_is_mean', -1):.2f}")
 
-            # Print intermediate results
-            print(f"    Overall FID: {results.get('overall_fid', -1):.2f}")
-            print(f"    Overall IS: {results.get('overall_is_mean', -1):.2f}")
-
-            # Log to WandB
-            log_results_to_wandb(results, wandb_run)
+        # Log to WandB
+        log_results_to_wandb(results, wandb_run)
 
         # Free memory
         del module

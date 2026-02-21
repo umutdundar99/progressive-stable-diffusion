@@ -213,10 +213,6 @@ class AdditiveOrdinalEmbedder(nn.Module):
         if scalar_input:
             labels = labels.unsqueeze(0)
 
-        # Smooth interpolation of negative labels:
-        # negative_label = max(0, 1 - label) for label in [0, 1]
-        # negative_label = 0 for label > 1
-        # This gives: label=0 -> neg=1, label=0.25 -> neg=0.75, label=0.5 -> neg=0.5, label=1+ -> neg=0
         negative_labels = torch.clamp(1.0 - labels, min=0.0, max=1.0)
 
         return self.forward(
@@ -225,6 +221,79 @@ class AdditiveOrdinalEmbedder(nn.Module):
             unconditional=False,
             noise_std=noise_std,
         )
+
+    def get_disease_delta_embedding(
+        self,
+        source_labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the *pure disease component* for negative steering (Phase 3).
+
+        Returns ``proj(E[source]) - proj(E[0])``, giving the disease-only
+        signal in projected token space that can be subtracted at inference.
+
+        The subtraction is done *after* projection so that projector bias
+        terms cancel out, ensuring Mayo 0 inputs yield a true zero delta.
+
+        Args:
+            source_labels: (B,) integer or float labels in [0, K-1].
+
+        Returns:
+            (B, num_tokens, embedding_dim) — projected disease delta.
+        """
+        return self.get_ordinal_delta_embedding(
+            source_labels=source_labels,
+            target_labels=torch.zeros_like(source_labels),
+        )
+
+    def get_ordinal_delta_embedding(
+        self,
+        source_labels: torch.Tensor,
+        target_labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute directional delta between two severity levels.
+
+        Returns ``proj(E[target]) - proj(E[source])`` in projected token space.
+        The subtraction is done *after* projection so projector bias terms cancel,
+        guaranteeing exact-zero output when source == target.
+
+        **Sign semantics:**
+
+        * Progression (target > source): positive delta → add disease features
+        * Regression  (target < source): negative delta → remove disease features
+        * Same level  (target == source): zero delta → no steering
+
+        Args:
+            source_labels: (B,) Mayo scores of the input image.
+            target_labels: (B,) desired Mayo scores for the output.
+
+        Returns:
+            (B, num_tokens, embedding_dim) — directional delta embeddings.
+        """
+        scalar_input = source_labels.dim() == 0
+        if scalar_input:
+            source_labels = source_labels.unsqueeze(0)
+            target_labels = target_labels.unsqueeze(0)
+
+        table = self._compute_class_table()  # (K, D)
+        max_idx = self.num_classes - 1
+
+        # Source embedding
+        src = source_labels.to(table.dtype).clamp(0.0, float(max_idx))
+        s_lo, s_hi = torch.floor(src), torch.clamp(torch.floor(src) + 1, max=max_idx)
+        src_emb = _linear_interpolate(table, s_lo.long(), s_hi.long(), src - s_lo)
+
+        # Target embedding
+        tgt = target_labels.to(table.dtype).clamp(0.0, float(max_idx))
+        t_lo, t_hi = torch.floor(tgt), torch.clamp(torch.floor(tgt) + 1, max=max_idx)
+        tgt_emb = _linear_interpolate(table, t_lo.long(), t_hi.long(), tgt - t_lo)
+
+        # Project both through the AOE projector, then subtract so biases cancel
+        proj_src = self.projector(src_emb).view(-1, self.num_tokens, self.embedding_dim)
+        proj_tgt = self.projector(tgt_emb).view(-1, self.num_tokens, self.embedding_dim)
+
+        delta = proj_tgt - proj_src  # (B, T, D)
+
+        return delta.squeeze(0) if scalar_input else delta
 
     def log_embedding_stats(self) -> dict:
         """Return embedding statistics for monitoring during training."""

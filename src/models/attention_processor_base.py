@@ -17,8 +17,6 @@ class OrdinalIPAttnProcessor2_0(nn.Module):
         num_image_tokens: int = 16,
         num_aoe_tokens: int = 16,
         frequency_mode: Literal["both", "aoe_dominant", "image_dominant"] = "both",
-        frequency_dominant_scale: float = 1.5,
-        frequency_non_dominant_scale: float = 0.5,
     ) -> None:
         super().__init__()
 
@@ -29,30 +27,14 @@ class OrdinalIPAttnProcessor2_0(nn.Module):
         self.frequency_mode = frequency_mode
 
         if frequency_mode == "aoe_dominant":
-            self.scale_aoe = frequency_dominant_scale
-            self.scale_ip = frequency_non_dominant_scale
+            self.scale_aoe = 1
+            self.scale_ip = 0
         elif frequency_mode == "image_dominant":
-            self.scale_aoe = frequency_non_dominant_scale
-            self.scale_ip = frequency_dominant_scale
+            self.scale_aoe = 0
+            self.scale_ip = 1
         else:
             self.scale_aoe = 1.0
             self.scale_ip = 1.0
-
-        # P2P: per-timestep storage for FULL cross-attention maps
-        self.p2p_attn_store: dict[int, torch.Tensor] = {}
-        self.p2p_inject_maps = False
-        self.p2p_current_step_idx: int = 0
-
-    def set_step_idx(self, idx: int) -> None:
-        """Set the current diffusion step index for per-step map storage."""
-        self.p2p_current_step_idx = idx
-
-    def set_p2p_switch_flag(self, flag: bool) -> None:
-        self.p2p_inject_maps = flag
-
-    def clear_attention_store(self) -> None:
-        """Clear all stored attention maps (call between passes)."""
-        self.p2p_attn_store.clear()
 
     def __call__(
         self,
@@ -117,16 +99,6 @@ class OrdinalIPAttnProcessor2_0(nn.Module):
             attn_weights = attn_weights + attention_mask
 
         attn_probs = F.softmax(attn_weights, dim=-1)
-
-        if not self.p2p_inject_maps:
-            self.p2p_attn_store[self.p2p_current_step_idx] = attn_probs.detach().cpu()
-        else:
-            step = self.p2p_current_step_idx
-            if step in self.p2p_attn_store:
-                saved = self.p2p_attn_store[step].to(
-                    attn_probs.device, dtype=attn_probs.dtype
-                )
-                attn_probs = saved
 
         if self.frequency_mode != "both":
             current_tokens = attn_probs.shape[-1]
@@ -200,8 +172,6 @@ def set_ordinal_ip_attention_processors(
     num_image_tokens: int = 16,
     num_aoe_tokens: int = 16,
     use_frequency_strategy: bool = True,
-    frequency_dominant_scale: float = 1.5,
-    frequency_non_dominant_scale: float = 0.5,
 ) -> dict:
     attn_procs = {}
 
@@ -237,8 +207,6 @@ def set_ordinal_ip_attention_processors(
                 num_image_tokens=num_image_tokens,
                 num_aoe_tokens=num_aoe_tokens,
                 frequency_mode=frequency_mode,
-                frequency_dominant_scale=frequency_dominant_scale,
-                frequency_non_dominant_scale=frequency_non_dominant_scale,
             )
 
             attn_procs[name] = processor

@@ -1,12 +1,17 @@
-"""
-Training pipeline for IP-Adapter with Ordinal Disease Conditioning.
+"""Training pipeline for IP-Adapter with Ordinal Disease Conditioning.
 
 This pipeline trains a diffusion model with dual conditioning:
 1. AOE (Additive Ordinal Embedding) for disease severity
 2. Image features for patient-specific anatomical structure
+
+Supports resuming from a checkpoint via `training.resume_checkpoint`:
+- null  → train from scratch
+- path  → resume from that .ckpt file (weights, optimizer, LR scheduler, epoch, etc.)
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import hydra
 from lightning import Trainer
@@ -22,18 +27,52 @@ from src.data.datamodule_ip import OrdinalIPDataModule
 from src.models.diffusion_module_ip import DiffusionModuleWithIP
 
 
-@hydra.main(version_base="1.4", config_path="../../configs", config_name="train_ip")
+def _resolve_checkpoint_path(cfg: DictConfig) -> str | None:
+    """Resolve the checkpoint path from config.
+
+    Returns:
+        Absolute path string to the checkpoint, or None to train from scratch.
+    """
+    ckpt_path = cfg.training.get("resume_checkpoint", None)
+    if ckpt_path is None:
+        return None
+
+    ckpt_path = str(ckpt_path)
+
+    if ckpt_path.lower() == "last":
+        return "last"
+
+    resolved = Path(ckpt_path).expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(
+            f"Resume checkpoint not found: {resolved}\n"
+            "Set training.resume_checkpoint=null to train from scratch."
+        )
+    return str(resolved)
+
+
+@hydra.main(version_base="1.4", config_path="../../../configs", config_name="train_ip")
 def main(cfg: DictConfig) -> None:
     """Main training function for IP-Adapter."""
+
+    ckpt_path = _resolve_checkpoint_path(cfg)
+    if ckpt_path is not None:
+        print(f"🔄 Resuming training from checkpoint: {ckpt_path}")
+    else:
+        print("🆕 Starting training from scratch.")
 
     datamodule = OrdinalIPDataModule(cfg)
 
     diffusion = DiffusionModuleWithIP(cfg)
 
-    # Logger
+    resume_wandb = (
+        "must" if ckpt_path is not None and cfg.wandb.get("run_id", None) else "allow"
+    )
     wandb_logger = WandbLogger(
         project=cfg.wandb.project,
         name=cfg.wandb.run_name,
+        id=cfg.wandb.get("run_id", None),
+        resume=resume_wandb,
         log_model=False,
         offline=cfg.wandb.offline,
         group=cfg.wandb.get("group", None),
@@ -81,7 +120,9 @@ def main(cfg: DictConfig) -> None:
         benchmark=True,
     )
 
-    trainer.fit(model=diffusion, datamodule=datamodule)
+    trainer.fit(
+        model=diffusion, datamodule=datamodule, ckpt_path=ckpt_path, weights_only=False
+    )
 
 
 if __name__ == "__main__":

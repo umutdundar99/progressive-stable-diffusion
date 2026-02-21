@@ -20,9 +20,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from .attention_processor import (
-    set_ordinal_ip_attention_processors,
-)
+from .attention_processor_routing_gates import set_split_injection_processors
+from .feature_purifier import FeaturePurifier
 from .image_encoder import ImageEncoder, ImageProjection, ImageProjectionPlus
 from .lr_scheduler import LinearWarmupCosineAnnealingLR
 from .ordinal_embedder import AdditiveOrdinalEmbedder
@@ -50,8 +49,10 @@ class DiffusionIPConfig:
     num_aoe_tokens: int = 16
     use_frequency_strategy: bool = True
     use_image_projection_plus: bool = False
-    frequency_dominant_scale: float = 0.5
-    frequency_non_dominant_scale: float = 1.5
+    use_feature_purifier: bool = True
+    purifier_num_heads: int = 8
+    purifier_ff_mult: int = 2
+    delta_scale: float = 0.0
 
 
 class DiffusionModuleWithIP(pl.LightningModule):
@@ -65,7 +66,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
     - Image Projection (trainable): Project image features to UNet dimension
     - AOE (trainable): Ordinal embeddings for disease severity
     - UNet (trainable): Noise prediction with dual conditioning
-    - OrdinalIPAttnProcessor (trainable): Custom attention for both conditions
+    - OrdinalUNet + SplitInjectionAttentionProcessor (trainable): Dual-pathway attention
     """
 
     def __init__(self, cfg: Any) -> None:
@@ -94,23 +95,20 @@ class DiffusionModuleWithIP(pl.LightningModule):
             ),
             num_aoe_tokens=getattr(cfg.model, "num_aoe_tokens", 16),
             use_frequency_strategy=getattr(cfg.model, "use_frequency_strategy", True),
-            frequency_dominant_scale=getattr(
-                cfg.diffusion, "frequency_dominant_scale", 0.5
-            ),
-            frequency_non_dominant_scale=getattr(
-                cfg.diffusion, "frequency_non_dominant_scale", 1.5
-            ),
+            use_feature_purifier=getattr(cfg.model, "use_feature_purifier", True),
+            purifier_num_heads=getattr(cfg.model, "purifier_num_heads", 8),
+            purifier_ff_mult=getattr(cfg.model, "purifier_ff_mult", 2),
+            delta_scale=getattr(cfg.model, "delta_scale", 0.0),
         )
 
         # VAE (FROZEN)
         vae_path = getattr(
             cfg.model, "pretrained_vae_path", cfg.model.pretrained_unet_path
         )
+        _use_fp16 = cfg.training.precision in (16, "16", "16-mixed")
         self.vae = SDVAE(
             pretrained_path=vae_path,
-            torch_dtype=torch.float16
-            if cfg.training.precision == 16
-            else torch.float32,
+            torch_dtype=torch.float16 if _use_fp16 else torch.float32,
             local_files_only=False,
         )
 
@@ -153,6 +151,15 @@ class DiffusionModuleWithIP(pl.LightningModule):
         )
         self.unet = OrdinalUNet(unet_config)
 
+        if self.diff_cfg.use_feature_purifier:
+            self.feature_purifier = FeaturePurifier(
+                dim=cfg.model.conditioning_dim,
+                num_heads=self.diff_cfg.purifier_num_heads,
+                ff_mult=self.diff_cfg.purifier_ff_mult,
+            )
+        else:
+            self.feature_purifier = None
+
         self._setup_attention_processors()
 
         betas, alphas_cumprod = self._build_noise_schedule()
@@ -182,16 +189,15 @@ class DiffusionModuleWithIP(pl.LightningModule):
         self._print_trainable_params()
 
     def _setup_attention_processors(self) -> None:
-        """Replace UNet attention processors with OrdinalIPAttnProcessors."""
-        # Access the underlying diffusers UNet
+        """Replace UNet cross-attention processors with SplitInjectionAttentionProcessors."""
         unet = self.unet.unet
-        set_ordinal_ip_attention_processors(
+        set_split_injection_processors(
             unet=unet,
             num_image_tokens=self.diff_cfg.num_image_tokens,
             num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
+            num_delta_tokens=self.diff_cfg.num_aoe_tokens,  # same token count as AOE
             use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
-            frequency_dominant_scale=self.diff_cfg.frequency_dominant_scale,
-            frequency_non_dominant_scale=self.diff_cfg.frequency_non_dominant_scale,
+            delta_scale=self.diff_cfg.delta_scale,
         )
 
     def _print_trainable_params(self) -> None:
@@ -216,10 +222,20 @@ class DiffusionModuleWithIP(pl.LightningModule):
             f"  UNet: {count_params(self.unet):,} trainable / {count_all_params(self.unet):,} total"
         )
 
+        if self.feature_purifier is not None:
+            print(
+                f"  Feature Purifier: {count_params(self.feature_purifier):,} trainable"
+            )
+
         total_trainable = (
             count_params(self.image_projection)
             + count_params(self.ordinal_embedder)
             + count_params(self.unet)
+            + (
+                count_params(self.feature_purifier)
+                if self.feature_purifier is not None
+                else 0
+            )
         )
         print(f"  TOTAL TRAINABLE: {total_trainable:,}")
 
@@ -289,26 +305,43 @@ class DiffusionModuleWithIP(pl.LightningModule):
         labels: Tensor,
         structure_images: Tensor,
         is_training: bool = True,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         """
-        Prepare combined conditioning: AOE + Image embeddings.
+        Prepare 3-segment conditioning: [Target_AOE | E_clean | Delta_AOE].
+
+        Phase 1 (FeaturePurifier) runs here: source_aoe is used to detect
+        and subtract disease from image embeddings *before* they enter UNet.
+
+        During training, source_label == target_label (same sample), so the
+        purifier removes the disease that's actually present in the image,
+        and Delta_AOE is all-zeros (no steering when source == target).
 
         Args:
-            labels: Mayo scores (B,)
+            labels: Mayo scores (B,) — used for both source and target during training
             structure_images: Blurred/depth images (B, 3, H, W)
             is_training: Whether in training mode
 
         Returns:
-            Combined embeddings (B, aoe_tokens + image_tokens, D)
+            (target_aoe_embeds, cleaned_image_embeds, delta_embeds) — each (B, N, D)
         """
-
+        # Target AOE: the desired disease severity
         aoe_embeds = self.ordinal_embedder(labels, is_training=is_training)
         if aoe_embeds.dim() == 2:
             aoe_embeds = aoe_embeds.unsqueeze(1)
 
+        # Raw image embeddings from CLIP + projection
         image_embeds = self._get_image_embeds(structure_images)
 
-        return aoe_embeds, image_embeds
+        # Phase 1: FeaturePurifier — disease erasure at embedding level
+        # During training, source_aoe == target_aoe (same label)
+        if self.feature_purifier is not None:
+            source_aoe = aoe_embeds  # same as target during training
+            image_embeds = self.feature_purifier(image_embeds, source_aoe)
+
+        # Delta embeddings: zeros during training (source == target)
+        delta_embeds = torch.zeros_like(aoe_embeds)
+
+        return aoe_embeds, image_embeds, delta_embeds
 
     def forward(
         self,
@@ -321,7 +354,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
     def training_step(self, batch: Any, batch_idx: int) -> Tensor:
         """
-        Training step with dual conditioning.
+        Training step with dual conditioning and orthogonal disentanglement.
 
         Following Meryem's methodology (Section 3.5):
         - AOE conditioning is ALWAYS provided (no CFG dropout for ordinal embeddings)
@@ -357,19 +390,23 @@ class DiffusionModuleWithIP(pl.LightningModule):
         t = self._sample_timesteps(batch_size)
         noisy_latents = self._q_sample(latents, t, noise)
 
-        # Get AOE embeddings
-        aoe_embeds, image_embeds = self._prepare_conditioning(
+        # Get AOE + Image + Delta embeddings
+        aoe_embeds, image_embeds, delta_embeds = self._prepare_conditioning(
             labels, structure_images, is_training=True
         )
 
+        # CFG dropout — zero out image (E_clean) tokens for some samples
         cfg_drop_prob = getattr(self.cfg.model, "cfg_drop_prob", 0.1)
         drop_mask = torch.rand(batch_size, device=self.device) < cfg_drop_prob
         zero_image_embeds = torch.zeros_like(image_embeds)
 
         drop_mask_expanded = drop_mask.view(-1, 1, 1).expand_as(image_embeds)
         image_embeds = torch.where(drop_mask_expanded, zero_image_embeds, image_embeds)
-        combined_embeds = torch.cat([aoe_embeds, image_embeds], dim=1)
 
+        # 3-segment layout: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
+        combined_embeds = torch.cat([aoe_embeds, image_embeds, delta_embeds], dim=1)
+
+        # ── Diffusion loss ──
         noise_pred = self.unet(noisy_latents, t, combined_embeds)
 
         base_loss = F.mse_loss(noise_pred, noise, reduction="none")
@@ -397,6 +434,10 @@ class DiffusionModuleWithIP(pl.LightningModule):
             {"params": self.ordinal_embedder.parameters(), "lr": opt_cfg.lr},
             {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 2},
         ]
+        if self.feature_purifier is not None:
+            params.append(
+                {"params": self.feature_purifier.parameters(), "lr": opt_cfg.lr * 2}
+            )
 
         optimizer = torch.optim.AdamW(
             params,

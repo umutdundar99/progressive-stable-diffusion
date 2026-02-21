@@ -11,7 +11,7 @@ model:
   base_channels: 320
   num_res_blocks: [2, 2, 2, 2]
   attention_heads: 8
-  cfg_drop_prob: 0.1
+  cfg_drop_prob: 0.0
   latent_channels: 4
   use_pretrained_vae: true
   pretrained_vae_path: "CompVis/stable-diffusion-v1-4"
@@ -22,10 +22,15 @@ model:
   use_image_projection_plus: true
   blur_kernel_size: 11
   blur_sigma: 15.0
+  use_blur: False
 
   use_frequency_strategy: true
-  frequency_dominant_scale: 1.5
-  frequency_non_dominant_scale: 0.5
+
+
+  use_feature_purifier: true
+  purifier_num_heads: 8
+  purifier_ff_mult: 2
+  delta_scale: 0.0
 
   ordinal_embedder:
     type: "aoe"
@@ -43,11 +48,11 @@ optimizer:
 scheduler:
   name: "cosine"
   warmup_epochs: 2
-  max_epochs: 150
+  max_epochs: 100
   min_lr: 1e-6
 
 dataset:
-  dataset_path: /home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data_copy
+  dataset_path: data/limuc_cleaned
   batch_size: 64
   num_workers: 24
   persistent_workers: true
@@ -61,7 +66,6 @@ dataset:
     rotation: 5
     center_crop: 224
     perspective: 0.2
-
 
 training:
   max_epochs: 150
@@ -81,12 +85,13 @@ training:
   compile_mode: "reduce-overhead"
   gradient_checkpointing: true
   noise_offset: 0.0
-
+  resume_checkpoint: null
 
 wandb:
   project: "prog-disease-generation-ip"
-  group: "p2p-ip"
-  run_name: "dominant_15_nondominant_05_without_contrastive_loss"
+  group: "cvpr_final"
+  run_name: "purifier without routing gates"
+  run_id: null
   log_samples_every_n_steps: 50
   offline: False
 
