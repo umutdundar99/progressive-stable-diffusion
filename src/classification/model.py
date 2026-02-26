@@ -7,7 +7,7 @@ with comprehensive metrics logging for medical image classification.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
@@ -29,6 +29,92 @@ from torchmetrics import (
 )
 from torchmetrics.classification import MulticlassCalibrationError
 from torchvision import models
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance.
+
+    Focal Loss reduces the relative loss for well-classified examples,
+    focusing training on hard, misclassified examples.
+
+    Reference: Lin et al. "Focal Loss for Dense Object Detection" (ICCV 2017)
+    """
+
+    def __init__(
+        self,
+        alpha: Optional[Tensor] = None,
+        gamma: float = 2.0,
+        reduction: str = "mean",
+        label_smoothing: float = 0.0,
+    ) -> None:
+        """
+        Initialize Focal Loss.
+
+        Args:
+            alpha: Class weights tensor of shape (num_classes,). If None, no weighting.
+            gamma: Focusing parameter. Higher values focus more on hard examples.
+                   gamma=0 is equivalent to Cross-Entropy loss.
+            reduction: Reduction method ('mean', 'sum', 'none')
+            label_smoothing: Label smoothing factor (0.0 = no smoothing)
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.label_smoothing = label_smoothing
+
+    def forward(self, inputs: Tensor, targets: Tensor) -> Tensor:
+        """
+        Compute focal loss.
+
+        Args:
+            inputs: Logits tensor of shape (N, C) where C is num_classes
+            targets: Target tensor of shape (N,) with class indices
+
+        Returns:
+            Focal loss value
+        """
+        # Apply label smoothing to targets if needed
+        num_classes = inputs.size(1)
+
+        # Compute cross-entropy (log softmax + nll)
+        log_probs = F.log_softmax(inputs, dim=1)
+        probs = torch.exp(log_probs)
+
+        # Get the probabilities for the target classes
+        targets_one_hot = F.one_hot(targets, num_classes=num_classes).float()
+
+        # Apply label smoothing
+        if self.label_smoothing > 0:
+            targets_one_hot = (
+                targets_one_hot * (1 - self.label_smoothing)
+                + self.label_smoothing / num_classes
+            )
+
+        # Compute focal weights: (1 - p_t)^gamma
+        pt = (probs * targets_one_hot).sum(dim=1)
+        focal_weights = (1 - pt) ** self.gamma
+
+        # Compute cross-entropy loss per sample
+        ce_loss = -(targets_one_hot * log_probs).sum(dim=1)
+
+        # Apply class weights (alpha)
+        if self.alpha is not None:
+            alpha = self.alpha.to(inputs.device)
+            alpha_t = alpha[targets]
+            focal_weights = focal_weights * alpha_t
+
+        # Compute focal loss
+        focal_loss = focal_weights * ce_loss
+
+        # Apply reduction
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 class ResNetClassifier(pl.LightningModule):
@@ -72,9 +158,16 @@ class ResNetClassifier(pl.LightningModule):
         # Build model
         self.model = self._build_model()
 
-        # Loss function
+        # Loss function configuration
         self.class_weights = class_weights
         self.label_smoothing = cfg.training.get("label_smoothing", 0.0)
+        self.loss_type: Literal["ce", "focal"] = cfg.training.get(
+            "loss_type", "ce"
+        ).lower()
+        self.focal_gamma = cfg.training.get("focal_gamma", 2.0)
+
+        # Initialize loss function
+        self.loss_fn = self._build_loss_fn()
 
         # Metrics for training
         self._setup_metrics("train")
@@ -115,6 +208,23 @@ class ResNetClassifier(pl.LightningModule):
         )
 
         return model
+
+    def _build_loss_fn(self) -> nn.Module:
+        """Build the loss function based on configuration."""
+        if self.loss_type == "focal":
+            return FocalLoss(
+                alpha=self.class_weights,
+                gamma=self.focal_gamma,
+                reduction="mean",
+                label_smoothing=self.label_smoothing,
+            )
+        elif self.loss_type == "ce":
+            # Return None to use F.cross_entropy directly
+            return None
+        else:
+            raise ValueError(
+                f"Unknown loss type: {self.loss_type}. Choose from: 'ce', 'focal'"
+            )
 
     def _setup_metrics(self, prefix: str) -> None:
         """Set up metrics for a given stage (train/val/test)."""
@@ -246,18 +356,23 @@ class ResNetClassifier(pl.LightningModule):
         )
 
     def _get_loss(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """Compute cross-entropy loss with optional label smoothing and class weights."""
-        if self.class_weights is not None:
-            weight = self.class_weights.to(logits.device)
+        """Compute loss based on configured loss function (CE or Focal)."""
+        if self.loss_type == "focal":
+            # Focal loss handles class weights and label smoothing internally
+            return self.loss_fn(logits, targets)
         else:
-            weight = None
+            # Cross-entropy loss
+            if self.class_weights is not None:
+                weight = self.class_weights.to(logits.device)
+            else:
+                weight = None
 
-        return F.cross_entropy(
-            logits,
-            targets,
-            weight=weight,
-            label_smoothing=self.label_smoothing,
-        )
+            return F.cross_entropy(
+                logits,
+                targets,
+                weight=weight,
+                label_smoothing=self.label_smoothing,
+            )
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward pass through the model."""

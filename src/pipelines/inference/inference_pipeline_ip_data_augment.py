@@ -30,7 +30,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch import Tensor
@@ -56,10 +55,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--sampling-steps", type=int, default=50)
     p.add_argument("--image-scale", type=float, default=1.0)
     p.add_argument("--steer-scale", type=float, default=0.5)
+    p.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=None,
+        help="CFG guidance scale (baseline mode only). "
+        "Default reads from config or 1.0.",
+    )
     p.add_argument("--eta", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--no-blur", action="store_true", default=True)
     p.add_argument(
         "--batch-images",
         type=int,
@@ -118,38 +123,14 @@ def _init_image_pipeline(target_size: int) -> None:
 def _load_structure_image(
     image_path: Path,
     device: torch.device,
-    apply_blur: bool = False,
-    blur_kernel_size: int = 7,
-    blur_sigma: float = 2.0,
 ) -> Tensor:
     """Load one image → CLIP-ready tensor (1, 3, 224, 224) on *device*."""
     pil = Image.open(image_path).convert("RGB")
     display = _DISPLAY_TRANSFORM(pil)
 
-    if apply_blur:
-        display = _apply_gaussian_blur(
-            display.unsqueeze(0), kernel_size=blur_kernel_size, sigma=blur_sigma
-        ).squeeze(0)
-
     pil_out = transforms.ToPILImage()(display)
     clip_inputs = _CLIP_PROCESSOR(images=pil_out, return_tensors="pt", do_rescale=True)
     return clip_inputs.pixel_values.to(device)
-
-
-def _apply_gaussian_blur(
-    images: Tensor, kernel_size: int = 15, sigma: float = 5.0
-) -> Tensor:
-    dev, dt = images.device, images.dtype
-    x = torch.arange(kernel_size, device=dev, dtype=dt) - kernel_size // 2
-    g = torch.exp(-(x**2) / (2 * sigma**2))
-    g = g / g.sum()
-    gh = g.view(1, 1, 1, -1).expand(3, 1, 1, -1)
-    gv = g.view(1, 1, -1, 1).expand(3, 1, -1, 1)
-    pad = kernel_size // 2
-    b = F.pad(images, (pad, pad, pad, pad), mode="reflect")
-    b = F.conv2d(b, gh, groups=3)
-    b = F.conv2d(b, gv, groups=3)
-    return b.clamp(0, 1)
 
 
 def _tensor_to_bmp(image_tensor: Tensor, save_path: Path) -> None:
@@ -165,16 +146,35 @@ def _prepare_conditioning(
     source_labels: Tensor,
     structure_images: Tensor,
     image_scale: float = 1.0,
+    zero_aoe: bool = False,
 ) -> Tensor:
-    """Prepare 3-segment conditioning for a **batch** of (source, target) pairs.
+    """Prepare conditioning for a **batch** of (source, target) pairs.
 
-    ``structure_images`` is (B, 3, 224, 224) — one per sample.
-    Returns (B, S, D) with segments [target_aoe | image_embeds | delta_embeds].
+    ``structure_images`` is (B, 3, 224, 224) -- one per sample.
+
+    When ``use_routing_gates=True``:
+        3-segment: [target_aoe | image_embeds | delta_embeds]
+    When ``use_routing_gates=False``:
+        2-segment: [aoe | image_embeds]
+
+    Args:
+        zero_aoe: If True, replace AOE with ``get_negative_embedding``
+                  (unconditional pass for CFG).
     """
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+
     # Target AOE
     t_aoe = module.ordinal_embedder(target_labels, is_training=False)
     if t_aoe.dim() == 2:
         t_aoe = t_aoe.unsqueeze(1)
+
+    # CFG unconditional pass: replace AOE with negative conditioning
+    if zero_aoe:
+        t_aoe = module.ordinal_embedder.get_negative_embedding(
+            target_labels, is_training=False
+        )
+        if t_aoe.dim() == 2:
+            t_aoe = t_aoe.unsqueeze(1)
 
     # Source AOE (for purifier)
     s_aoe = module.ordinal_embedder(source_labels, is_training=False)
@@ -188,14 +188,17 @@ def _prepare_conditioning(
     if image_scale != 1.0:
         img_emb = img_emb * image_scale
 
-    # Delta
-    delta = module.ordinal_embedder.get_ordinal_delta_embedding(
-        source_labels, target_labels
-    )
-    if delta.dim() == 2:
-        delta = delta.unsqueeze(1)
-
-    return torch.cat([t_aoe, img_emb, delta], dim=1)
+    if use_routing_gates:
+        # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+        delta = module.ordinal_embedder.get_ordinal_delta_embedding(
+            source_labels, target_labels
+        )
+        if delta.dim() == 2:
+            delta = delta.unsqueeze(1)
+        return torch.cat([t_aoe, img_emb, delta], dim=1)
+    else:
+        # 2-segment: [AOE | Image]
+        return torch.cat([t_aoe, img_emb], dim=1)
 
 
 def _set_delta_scale_on_processors(module: DiffusionModuleWithIP, s: float) -> None:
@@ -215,12 +218,16 @@ def _ddim_sample_batched(
     eta: float = 0.0,
     image_scale: float = 1.0,
     steer_scale: float = 0.0,
+    guidance_scale: float = 1.0,
 ) -> Tensor:
     """DDIM sampling for an arbitrary-sized batch of (source, targets) pairs.
 
-    Single conditional pass — no CFG. Disease control is handled entirely
-    by attention-level steering (dynamic gates + delta pathway).
+    Routing-gates mode: single pass (guidance_scale ignored).
+    Baseline mode: CFG dual-pass when guidance_scale != 1.0.
+    Unconditional AOE uses ``get_negative_embedding``.
     """
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+    do_cfg = (not use_routing_gates) and (guidance_scale != 1.0)
 
     model_dtype = next(module.unet.parameters()).dtype
 
@@ -233,20 +240,37 @@ def _ddim_sample_batched(
     ac = module.alphas_cumprod
     ts = torch.linspace(T - 1, 0, steps=sampling_steps, dtype=torch.long, device=device)
 
-    embed = _prepare_conditioning(
+    embed_cond = _prepare_conditioning(
         module,
         target_labels,
         source_labels,
         structure_images,
         image_scale=image_scale,
     ).to(model_dtype)
+
+    embed_uncond = None
+    if do_cfg:
+        embed_uncond = _prepare_conditioning(
+            module,
+            target_labels,
+            source_labels,
+            structure_images,
+            image_scale=image_scale,
+            zero_aoe=True,
+        ).to(model_dtype)
+
     _set_delta_scale_on_processors(module, steer_scale)
 
     for i, t_s in enumerate(ts):
         ti = int(t_s.item())
         t = torch.full((B,), ti, dtype=torch.long, device=device)
 
-        eps = module(latents, t, embed)
+        if do_cfg:
+            eps_cond = module(latents, t, embed_cond)
+            eps_uncond = module(latents, t, embed_uncond)
+            eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+        else:
+            eps = module(latents, t, embed_cond)
 
         ab = ac[ti].to(device=device, dtype=latents.dtype)
         sa = torch.sqrt(ab)
@@ -356,6 +380,18 @@ def main() -> None:
 
     module.eval()
 
+    # -- Resolve guidance scale ------------------------------------------------
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+    if args.guidance_scale is not None:
+        guidance_scale = args.guidance_scale
+    else:
+        guidance_scale = getattr(module.diff_cfg, "guidance_scale", 1.0)
+    if use_routing_gates:
+        guidance_scale = 1.0
+    print(
+        f"   use_routing_gates={use_routing_gates}  " f"guidance_scale={guidance_scale}"
+    )
+
     torch.backends.cudnn.benchmark = True
 
     if args.compile and hasattr(torch, "compile"):
@@ -393,11 +429,6 @@ def main() -> None:
         return
 
     print("\n🎨 Step 3: Generating (batched) ...")
-    blur_cfg = cfg.model
-    apply_blur = not args.no_blur
-    bk = getattr(blur_cfg, "blur_kernel_size", 7)
-    bs = getattr(blur_cfg, "blur_sigma", 2.0)
-
     generated_counts = {m: 0 for m in ALL_MES_CLASSES}
     saver = ThreadPoolExecutor(max_workers=args.save_workers)
     futures = []
@@ -420,9 +451,6 @@ def main() -> None:
             struct = _load_structure_image(
                 job["path"],
                 device,
-                apply_blur=apply_blur,
-                blur_kernel_size=bk,
-                blur_sigma=bs,
             )
             for tc in job["targets"]:
                 all_targets.append(tc)
@@ -447,6 +475,7 @@ def main() -> None:
             eta=args.eta,
             image_scale=args.image_scale,
             steer_scale=args.steer_scale,
+            guidance_scale=guidance_scale,
         )
 
         images = _decode_latents(module, latents)

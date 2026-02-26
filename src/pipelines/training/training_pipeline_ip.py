@@ -80,11 +80,9 @@ def main(cfg: DictConfig) -> None:
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
-        every_n_epochs=50,
         save_last=True,
-        save_top_k=-1,
+        save_top_k=0,
         save_on_train_epoch_end=True,
-        filename="ip-ddpm-epoch{epoch:04d}",
     )
 
     ema_callback = EMAWeightAveraging(

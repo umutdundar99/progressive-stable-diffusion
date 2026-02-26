@@ -28,9 +28,9 @@ class OrdinalIPAttnProcessor2_0(nn.Module):
 
         if frequency_mode == "aoe_dominant":
             self.scale_aoe = 1
-            self.scale_ip = 0
+            self.scale_ip = 1
         elif frequency_mode == "image_dominant":
-            self.scale_aoe = 0
+            self.scale_aoe = 1
             self.scale_ip = 1
         else:
             self.scale_aoe = 1.0

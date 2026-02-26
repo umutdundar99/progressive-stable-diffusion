@@ -11,7 +11,7 @@ model:
   base_channels: 320
   num_res_blocks: [2, 2, 2, 2]
   attention_heads: 8
-  cfg_drop_prob: 0.07
+  cfg_drop_prob: 0.0
   latent_channels: 4
   use_pretrained_vae: true
   pretrained_vae_path: "CompVis/stable-diffusion-v1-4"
@@ -25,8 +25,8 @@ model:
   use_blur: False
   use_frequency_strategy: true
 
-  use_routing_gates: false
-  use_feature_purifier: true
+  use_routing_gates: true
+  use_feature_purifier: false
 
   purifier_num_heads: 8
   purifier_ff_mult: 2
@@ -84,15 +84,16 @@ training:
   use_compile: false
   compile_mode: "reduce-overhead"
   gradient_checkpointing: true
+  noise_offset: 0.0
   resume_checkpoint: null
 
 wandb:
   project: "prog-disease-generation-ip"
   group: "cvpr_final"
-  run_name: "no routing attention scales 1"
+  run_name: "no purifier no routing gates"
   run_id: null
   log_samples_every_n_steps: 50
-  offline: false
+  offline: False
 
 diffusion:
   noise_schedule: "linear"

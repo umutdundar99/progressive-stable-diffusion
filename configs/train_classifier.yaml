@@ -7,14 +7,14 @@ model:
 
 
 dataset:
-  data_root: "data/limuc/processed_data_scale1"
+  data_root: "data/rx8g05qi/limuc_cleaned_balanced_rx8g05qi_steer_30"
   image_size: 224
   num_workers: 16
   pin_memory: true
 
 logging:
   project_name: "mes-classifier"
-  experiment_name: "resnet18-baseline-balanced-dataset-scale1"
+  experiment_name: "rx8g05qi_steer_30"
   log_every_n_steps: 10
   save_top_k: 3
   monitor_metric: "val/qwk"
@@ -23,14 +23,16 @@ logging:
 
 training:
   batch_size: 32
-  max_epochs: 75
+  max_epochs: 50
   learning_rate: 1e-4
   weight_decay: 1e-4
   optimizer: "adamw"  # adam, adamw, sgd
   scheduler: "cosine"  # cosine, step, plateau, none
   scheduler_params:
-    T_max: 100  # for cosine
+    T_max: 50  # for cosine
     eta_min: 1e-6
+  loss_type: "ce"  # ce (CrossEntropy) or focal (Focal Loss)
+  focal_gamma: 2.0  # Focal loss gamma parameter (only used when loss_type=focal)
   label_smoothing: 0.1
   class_weights: null  # null for auto-compute, or [w0, w1, w2, w3]
   gradient_clip_val: 1.0
@@ -78,6 +80,6 @@ early_stopping:
 hardware:
   accelerator: "auto"
   devices: 1
-  precision: "16"  # 32, 16-mixed, bf16-mixed
+  precision: "16"
 
 seed: 42

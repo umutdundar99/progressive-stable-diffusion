@@ -26,8 +26,6 @@ from pytorch_lightning.callbacks import (
 )
 from pytorch_lightning.loggers import WandbLogger
 
-# Fix for PyTorch 2.6+ checkpoint loading - set weights_only=False by default
-# This is safe since we trust our own checkpoints
 torch.load = partial(torch.load, weights_only=False)
 
 from src.classification.dataset import MESDataModule
@@ -190,17 +188,14 @@ def main() -> None:
     args = parse_args()
     cfg = load_config(args.config, args)
 
-    # Print configuration
     print("=" * 60)
     print("MES Classification Training")
     print("=" * 60)
     print(OmegaConf.to_yaml(cfg))
     print("=" * 60)
 
-    # Set seed for reproducibility
     pl.seed_everything(cfg.seed, workers=True)
 
-    # Setup data module
     print("\n📦 Setting up data module...")
     data_module = MESDataModule(
         data_root=cfg.dataset.data_root,
@@ -212,19 +207,16 @@ def main() -> None:
         use_weighted_sampler=True,
     )
 
-    # Setup data to get class weights
     data_module.setup("fit")
     class_weights = data_module.get_class_weights()
 
     if class_weights is not None:
         print(f"\n⚖️  Class weights: {class_weights.tolist()}")
 
-    # Use config-specified class weights if provided
     if cfg.training.class_weights is not None:
         class_weights = torch.tensor(cfg.training.class_weights, dtype=torch.float32)
         print(f"📝 Using config-specified class weights: {class_weights.tolist()}")
 
-    # Setup model
     print("\n🧠 Setting up model...")
     if args.resume and not args.test_only:
         print(f"📂 Resuming from checkpoint: {args.resume}")
@@ -240,17 +232,14 @@ def main() -> None:
     print(f"   Pretrained: {cfg.model.pretrained}")
     print(f"   Num classes: {cfg.model.num_classes}")
 
-    # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"   Total parameters: {total_params:,}")
     print(f"   Trainable parameters: {trainable_params:,}")
 
-    # Setup callbacks and logger
     callbacks = setup_callbacks(cfg)
     logger = setup_logger(cfg)
 
-    # Setup trainer
     trainer = pl.Trainer(
         accelerator=cfg.hardware.accelerator,
         devices=cfg.hardware.devices,
@@ -266,7 +255,6 @@ def main() -> None:
     )
 
     if args.test_only:
-        # Test only mode
         if args.resume is None:
             raise ValueError("--resume must be specified for --test-only mode")
 
@@ -279,20 +267,14 @@ def main() -> None:
         data_module.setup("test")
         trainer.test(model, datamodule=data_module)
     else:
-        # Training mode
         print("\n🚀 Starting training...")
         trainer.fit(model, datamodule=data_module)
 
-        # Test after training
         print("\n🧪 Running final test evaluation...")
         data_module.setup("test")
-        trainer.test(model, datamodule=data_module, ckpt_path="best")
-
-    # Save final config
-    # if logger is not None:
-    # config_save_path = Path(callbacks[0].dirpath) / "config.yaml"
-    # OmegaConf.save(cfg, config_save_path)
-    # print(f"\n💾 Config saved to: {config_save_path}")
+        trainer.test(
+            model, datamodule=data_module, ckpt_path="best", weights_only=False
+        )
 
     print("\n✅ Training completed!")
 

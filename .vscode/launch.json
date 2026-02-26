@@ -12,7 +12,7 @@
       }
     },
     {
-      "name": "Inference Diffusion",
+      "name": "Inference Diffusion rx8g05qi no purifier",
       "type": "python",
       "request": "launch",
       "program": "${workspaceFolder}/src/pipelines/inference/inference_pipeline_ip.py",
@@ -22,20 +22,86 @@
       },
       "args": [
 
-      "--checkpoint", "checkpoints/prog-disease-generation-ip-final/uqqx9kg9/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
-      "--config", "configs/train_ip.yaml",
+      "--checkpoint", "checkpoints/prog-disease-generation-ip-final/rx8g05qi_no_purifier/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--config", "configs/evaluation_configs/rx8g05qi_no_purifier.yaml",
       "--sampling-steps", "50",
       "--mes-steps", "13",
-      "--output-dir", "paper_outputs/paper_outputs_steer_vs_noguidance/uqqx9kg9/UC_patient_415_9",
-      "--structure-image", "data/limuc_cleaned/test/2/UC_patient_415_9.bmp",
-      "--no-blur",
+      "--output-dir", "paper_outputs/paper_outputs_steer_vs_noguidance/nrx8g05qi/UC_patient_199_47",
+      "--structure-image", "condition_images/3/UC_patient_199_47.bmp",
       "--image-scale", "1",
-      "--source-label", "2",
+      "--source-label", "3",
       "--steer-scale", "2.5",
       "--seed", "1",
       ]
-
     },
+    {
+      "name": "Inference Diffusion uqqx9kg9 all",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/inference/inference_pipeline_ip.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+
+      "--checkpoint", "checkpoints/prog-disease-generation-ip-final/uqqx9kg9_all/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--config", "configs/evaluation_configs/uqqx9kg9_all.yaml",
+      "--sampling-steps", "50",
+      "--mes-steps", "13",
+      "--output-dir", "paper_outputs/paper_outputs_steer_vs_noguidance/uqqx9kg9/UC_patient_199_47_0steer",
+      "--structure-image", "condition_images/3/UC_patient_199_47.bmp",
+      "--image-scale", "1",
+      "--source-label", "3",
+      "--steer-scale", "00.1",
+      "--seed", "1",
+      ]
+    },
+    {
+      "name": "Inference Diffusion c49zr7gl no route",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/inference/inference_pipeline_ip.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+
+      "--checkpoint", "checkpoints/prog-disease-generation-ip-final/c49zr7gl_no_routing/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--config", "configs/evaluation_configs/c49zr7gl_no_route.yaml",
+      "--sampling-steps", "50",
+      "--mes-steps", "13",
+      "--output-dir", "paper_outputs/paper_outputs_steer_vs_noguidance/c49zr7gl/UC_patient_199_47",
+      "--structure-image", "condition_images/3/UC_patient_199_47.bmp",
+      "--image-scale", "1",
+      "--guidance-scale", "2",
+      "--seed", "1",
+      ]
+    },
+    {
+      "name": "Inference Diffusion ouba7bp1 no route no purifier",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/pipelines/inference/inference_pipeline_ip.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+
+      "--checkpoint", "checkpoints/prog-disease-generation-ip-final/ouba7bp1_no_purifier_no_route/checkpoints/last.ckpt",
+      "--config", "configs/evaluation_configs/ouba7bp1_no_route_no_purifier.yaml",
+      "--sampling-steps", "50",
+      "--mes-steps", "13",
+      "--output-dir", "paper_outputs/paper_outputs_steer_vs_noguidance/ouba7bp1_no_route_no_purifier/UC_patient_199_47",
+      "--structure-image", "condition_images/3/UC_patient_199_47.bmp",
+      "--image-scale", "1",
+      "--guidance-scale", "1",
+      "--seed", "1",
+      ]
+    },
+
      {
       "name": "Inference Diffusion Data Augment",
       "type": "python",
@@ -54,33 +120,77 @@
       "--guidance-scale", "1",
       "--image-scale", "1",
       "--steer-scale", "1.5",
-      "--no-blur",
       "--seed", "42",
       "--batch-images", "8",
       "--save-workers", "4"
       ]
     },
+
     {
-      "name": "Inference Diffusion Inverted",
+      "name": "Evaluation Diffusion",
       "type": "python",
       "request": "launch",
-      "program": "${workspaceFolder}/src/pipelines/inference_pipeline.py",
+      "program": "src/pipelines/evaluation/evaluation_pipeline.py",
       "console": "integratedTerminal",
       "env": {
       "PYTHONPATH": "${workspaceFolder}"
       },
       "args": [
-      "--checkpoint", "/home/umut_dundar/repositories/progressive-stable-diffusion/prog-disease-generation/c8o3zs2i/checkpoints/ddpm-epochepoch=0099.ckpt",
-      "--config", "configs/train.yaml",
-      "--sampling-steps", "50",
-      "--mes-steps", "20",
-      "--output-dir", "outputs_inverted/c8o3zs2i_test_3_UC_patient_199_47",
-      //"--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_239_112.bmp",
-      "--structure-image", "/home/umut_dundar/repositories/progressive-stable-diffusion/data/limuc/processed_data/test/3/UC_patient_199_47.bmp",
-      "--guidance-scale", "1.0",
-      "--use-ddim-invert"
+      "--checkpoints",
+      "checkpoints/prog-disease-generation-ip-final/rx8g05qi_no_purifier/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "checkpoints/prog-disease-generation-ip-final/47xp2d1b_no_routing/checkpoints/last.ckpt",
+      "checkpoints/prog-disease-generation-ip-final/ouba7bp1_no_purifier_no_route/checkpoints/last.ckpt",
+      "checkpoints/prog-disease-generation-ip-final/uqqx9kg9_all/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--configs",
+      "configs/evaluation_configs/rx8g05qi_no_purifier.yaml",
+      "configs/evaluation_configs/47xp2d1b_no_routing.yaml",
+      "configs/evaluation_configs/ouba7bp1_no_purifier_no_route.yaml",
+      "configs/evaluation_configs/uqqx9kg9_all.yaml",
+      "--checkpoint-names",
+      "rx8g05qi_no_purifier",
+      "47xp2d1b_no_routing",
+      "ouba7bp1_no_purifier_no_route",
+      "uqqx9kg9_all",
+      "--scales", "1.0", "2.0", "3.0",
+      "--data-root", "data/limuc_cleaned/test", "data/limuc_cleaned/val",
+      "--batch-images", "4"
       ]
     },
+
+    {
+      "name": "Evaluation Save 40 Samples",
+      "type": "python",
+      "request": "launch",
+      "program": "src/pipelines/evaluation/save_eval_samples_pipeline.py",
+      "console": "integratedTerminal",
+      "env": {
+      "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+      "--checkpoints",
+      "checkpoints/prog-disease-generation-ip-final/rx8g05qi_no_purifier/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "checkpoints/prog-disease-generation-ip-final/47xp2d1b_no_routing/checkpoints/last.ckpt",
+      "checkpoints/prog-disease-generation-ip-final/ouba7bp1_no_purifier_no_route/checkpoints/last.ckpt",
+      "checkpoints/prog-disease-generation-ip-final/uqqx9kg9_all/checkpoints/ip-ddpm-epochepoch=0149.ckpt",
+      "--configs",
+      "configs/evaluation_configs/rx8g05qi_no_purifier.yaml",
+      "configs/evaluation_configs/47xp2d1b_no_routing.yaml",
+      "configs/evaluation_configs/ouba7bp1_no_purifier_no_route.yaml",
+      "configs/evaluation_configs/uqqx9kg9_all.yaml",
+      "--checkpoint-names",
+      "rx8g05qi_no_purifier",
+      "47xp2d1b_no_routing",
+      "ouba7bp1_no_purifier_no_route",
+      "uqqx9kg9_all",
+      "--scales", "1.0", "2.0", "3.0",
+      "--data-root", "data/limuc_cleaned/train",
+      "--num-per-class", "10",
+      "--output-dir", "outputs/eval_samples_train40",
+      "--batch-images", "4"
+      ]
+    },
+
+
     {
       "name": "Classifier Training",
       "type": "python",

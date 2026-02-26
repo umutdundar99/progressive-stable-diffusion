@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from .attention_processor_base import set_ordinal_ip_attention_processors
 from .attention_processor_routing_gates import set_split_injection_processors
 from .feature_purifier import FeaturePurifier
 from .image_encoder import ImageEncoder, ImageProjection, ImageProjectionPlus
@@ -42,7 +43,6 @@ class DiffusionIPConfig:
     min_snr_gamma: float = 1.0
     ema_update_interval: int = 10
     latent_scale: float = 0.18215
-    noise_offset: float = 0.0
     input_perturbation: float = 0.0
     image_encoder_path: str = "openai/clip-vit-base-patch16"
     num_image_tokens: int = 16
@@ -53,6 +53,7 @@ class DiffusionIPConfig:
     purifier_num_heads: int = 8
     purifier_ff_mult: int = 2
     delta_scale: float = 0.0
+    use_routing_gates: bool = True
 
 
 class DiffusionModuleWithIP(pl.LightningModule):
@@ -84,7 +85,6 @@ class DiffusionModuleWithIP(pl.LightningModule):
             min_snr_gamma=cfg.diffusion.min_snr_gamma,
             ema_update_interval=cfg.diffusion.ema_update_interval,
             latent_scale=getattr(cfg.diffusion, "latent_scale", 0.18215),
-            noise_offset=getattr(cfg.training, "noise_offset", 0.0),
             input_perturbation=getattr(cfg.training, "input_perturbation", 0.0),
             image_encoder_path=getattr(
                 cfg.model, "image_encoder_path", "openai/clip-vit-base-patch16"
@@ -99,6 +99,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
             purifier_num_heads=getattr(cfg.model, "purifier_num_heads", 8),
             purifier_ff_mult=getattr(cfg.model, "purifier_ff_mult", 2),
             delta_scale=getattr(cfg.model, "delta_scale", 0.0),
+            use_routing_gates=getattr(cfg.model, "use_routing_gates", True),
         )
 
         # VAE (FROZEN)
@@ -189,16 +190,30 @@ class DiffusionModuleWithIP(pl.LightningModule):
         self._print_trainable_params()
 
     def _setup_attention_processors(self) -> None:
-        """Replace UNet cross-attention processors with SplitInjectionAttentionProcessors."""
+        """Replace UNet cross-attention processors with IP-Adapter attention processors.
+
+        When ``use_routing_gates=True`` installs :class:`SplitInjectionAttentionProcessor`
+        (3-segment conditioning with learnable gates + delta steering).
+        When ``use_routing_gates=False`` installs :class:`OrdinalIPAttnProcessor2_0`
+        (2-segment conditioning with frequency-mode token masking).
+        """
         unet = self.unet.unet
-        set_split_injection_processors(
-            unet=unet,
-            num_image_tokens=self.diff_cfg.num_image_tokens,
-            num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
-            num_delta_tokens=self.diff_cfg.num_aoe_tokens,  # same token count as AOE
-            use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
-            delta_scale=self.diff_cfg.delta_scale,
-        )
+        if self.diff_cfg.use_routing_gates:
+            set_split_injection_processors(
+                unet=unet,
+                num_image_tokens=self.diff_cfg.num_image_tokens,
+                num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
+                num_delta_tokens=self.diff_cfg.num_aoe_tokens,
+                use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
+                delta_scale=self.diff_cfg.delta_scale,
+            )
+        else:
+            set_ordinal_ip_attention_processors(
+                unet=unet,
+                num_image_tokens=self.diff_cfg.num_image_tokens,
+                num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
+                use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
+            )
 
     def _print_trainable_params(self) -> None:
         """Print trainable vs frozen parameters."""
@@ -297,7 +312,6 @@ class DiffusionModuleWithIP(pl.LightningModule):
         else:
             image_embeds = self.image_encoder(structure_images)
 
-        # Project to UNet dimension (trainable)
         return self.image_projection(image_embeds)
 
     def _prepare_conditioning(
@@ -305,16 +319,19 @@ class DiffusionModuleWithIP(pl.LightningModule):
         labels: Tensor,
         structure_images: Tensor,
         is_training: bool = True,
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, ...]:
         """
-        Prepare 3-segment conditioning: [Target_AOE | E_clean | Delta_AOE].
+        Prepare conditioning embeddings for the UNet.
 
-        Phase 1 (FeaturePurifier) runs here: source_aoe is used to detect
-        and subtract disease from image embeddings *before* they enter UNet.
+        When ``use_routing_gates=True`` (split-injection):
+            Returns 3-segment: (target_aoe, cleaned_image, delta) — each (B, N, D)
+            Layout: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
 
-        During training, source_label == target_label (same sample), so the
-        purifier removes the disease that's actually present in the image,
-        and Delta_AOE is all-zeros (no steering when source == target).
+        When ``use_routing_gates=False`` (baseline):
+            Returns 2-segment: (aoe, image) — each (B, N, D)
+            Layout: [AOE(N) | Image(N)]
+
+        Phase 1 (FeaturePurifier) runs in both modes when enabled.
 
         Args:
             labels: Mayo scores (B,) — used for both source and target during training
@@ -322,7 +339,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
             is_training: Whether in training mode
 
         Returns:
-            (target_aoe_embeds, cleaned_image_embeds, delta_embeds) — each (B, N, D)
+            Tuple of embedding segments
         """
         # Target AOE: the desired disease severity
         aoe_embeds = self.ordinal_embedder(labels, is_training=is_training)
@@ -338,10 +355,13 @@ class DiffusionModuleWithIP(pl.LightningModule):
             source_aoe = aoe_embeds  # same as target during training
             image_embeds = self.feature_purifier(image_embeds, source_aoe)
 
-        # Delta embeddings: zeros during training (source == target)
-        delta_embeds = torch.zeros_like(aoe_embeds)
-
-        return aoe_embeds, image_embeds, delta_embeds
+        if self.diff_cfg.use_routing_gates:
+            # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+            delta_embeds = torch.zeros_like(aoe_embeds)
+            return aoe_embeds, image_embeds, delta_embeds
+        else:
+            # 2-segment: [AOE | Image]
+            return aoe_embeds, image_embeds
 
     def forward(
         self,
@@ -375,27 +395,24 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
         # Sample noise
         noise = torch.randn_like(latents)
-        if self.diff_cfg.noise_offset > 0:
-            noise_offset = self.diff_cfg.noise_offset * torch.randn(
-                batch_size,
-                latents.shape[1],
-                1,
-                1,
-                device=latents.device,
-                dtype=latents.dtype,
-            )
-            noise = noise + noise_offset
 
         # Sample timesteps and add noise
         t = self._sample_timesteps(batch_size)
         noisy_latents = self._q_sample(latents, t, noise)
 
-        # Get AOE + Image + Delta embeddings
-        aoe_embeds, image_embeds, delta_embeds = self._prepare_conditioning(
+        # Get AOE + Image (+ optional Delta) embeddings
+        cond_parts = self._prepare_conditioning(
             labels, structure_images, is_training=True
         )
 
-        # CFG dropout — zero out image (E_clean) tokens for some samples
+        if self.diff_cfg.use_routing_gates:
+            # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+            aoe_embeds, image_embeds, delta_embeds = cond_parts
+        else:
+            # 2-segment: [AOE | Image]
+            aoe_embeds, image_embeds = cond_parts
+
+        # CFG dropout — zero out image tokens for some samples
         cfg_drop_prob = getattr(self.cfg.model, "cfg_drop_prob", 0.1)
         drop_mask = torch.rand(batch_size, device=self.device) < cfg_drop_prob
         zero_image_embeds = torch.zeros_like(image_embeds)
@@ -403,8 +420,12 @@ class DiffusionModuleWithIP(pl.LightningModule):
         drop_mask_expanded = drop_mask.view(-1, 1, 1).expand_as(image_embeds)
         image_embeds = torch.where(drop_mask_expanded, zero_image_embeds, image_embeds)
 
-        # 3-segment layout: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
-        combined_embeds = torch.cat([aoe_embeds, image_embeds, delta_embeds], dim=1)
+        if self.diff_cfg.use_routing_gates:
+            # 3-segment layout: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
+            combined_embeds = torch.cat([aoe_embeds, image_embeds, delta_embeds], dim=1)
+        else:
+            # 2-segment layout: [AOE(N) | Image(N)]
+            combined_embeds = torch.cat([aoe_embeds, image_embeds], dim=1)
 
         # ── Diffusion loss ──
         noise_pred = self.unet(noisy_latents, t, combined_embeds)

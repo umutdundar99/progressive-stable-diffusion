@@ -6,17 +6,17 @@ set -euo pipefail
 cd /home/umut_dundar/repositories/progressive-stable-diffusion
 export PYTHONPATH="$PWD"
 
-CHECKPOINT="prog-disease-generation-ip/uqqx9kg9/checkpoints/ip-ddpm-epochepoch=0149.ckpt"
+CHECKPOINT="checkpoints/prog-disease-generation-ip-final/icmmf2dn_no_routing_no_purifier/checkpoints/ip-ddpm-epochepoch=0149.ckpt"
 CONFIG="configs/train_ip.yaml"
 DATA_ROOT="data/limuc_cleaned"
 
-STEER_SCALES=(1.0 1.5 2.0 2.5 3.0)
-SUFFIXES=(10 15 20 25 30)
+STEER_SCALES=(1.5 2.0 2.5 3.0)
+SUFFIXES=(15 20 25 30)
 
 for i in "${!STEER_SCALES[@]}"; do
     scale="${STEER_SCALES[$i]}"
     suffix="${SUFFIXES[$i]}"
-    output="data/limuc_cleaned_balanced_uqqx9kg9_steer_${suffix}"
+    output="data/icmmf2dn/limuc_cleaned_balanced_icmmf2dn_steer_${suffix}"
 
     echo ""
     echo "════════════════════════════════════════════════════════════"
@@ -28,17 +28,14 @@ for i in "${!STEER_SCALES[@]}"; do
         --config "$CONFIG" \
         --data-root "$DATA_ROOT" \
         --output-root "$output" \
-        --sampling-steps 50 \
-        --guidance-scale 1 \
         --image-scale 1 \
-        --steer-scale "$scale" \
-        --no-blur \
+        --guidance-scale "$scale" \
         --seed 42 \
-        --batch-images 8 \
+        --batch-images 4 \
         --save-workers 4
 
-    echo "✅ Done: steer_scale=${scale}"
+    echo "✅ Done: guidance_scale=${scale}"
 done
 
 echo ""
-echo "🎉 All steer scale sweeps completed!"
+echo "🎉 All guidance scale sweeps completed!"

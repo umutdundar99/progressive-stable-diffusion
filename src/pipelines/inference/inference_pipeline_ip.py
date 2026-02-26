@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch import Tensor
@@ -123,12 +122,6 @@ def _parse_args() -> argparse.Namespace:
         help="DDIM eta parameter (0=deterministic, 1=DDPM).",
     )
     parser.add_argument(
-        "--no-blur",
-        action="store_true",
-        default=False,
-        help="Skip blurring the structure image (use raw image features).",
-    )
-    parser.add_argument(
         "--zero-image",
         action="store_true",
         default=False,
@@ -158,6 +151,13 @@ def _parse_args() -> argparse.Namespace:
         "inside SplitInjectionAttentionProcessor is activated, adding/subtracting "
         "the directional disease change (E[target] - E[source]).  "
         "Recommended range: 0.3–1.0.  0 disables steering.",
+    )
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=None,
+        help="CFG guidance scale (baseline mode only). "
+        "Default reads from config or 1.0.",
     )
     return parser.parse_args()
 
@@ -199,9 +199,6 @@ def _load_and_preprocess_structure_image(
     image_path: Path,
     target_size: int,
     device: torch.device,
-    apply_blur: bool = False,
-    blur_kernel_size: int = 7,
-    blur_sigma: float = 2.0,
 ) -> Tuple[Tensor, Tensor]:
     """
     Load and preprocess the structure image.
@@ -221,13 +218,6 @@ def _load_and_preprocess_structure_image(
     )
     display_tensor = transform_display(pil_image)
 
-    if apply_blur:
-        display_tensor = _apply_gaussian_blur(
-            display_tensor.unsqueeze(0),
-            kernel_size=blur_kernel_size,
-            sigma=blur_sigma,
-        ).squeeze(0)
-
     blurred_pil = transforms.ToPILImage()(display_tensor)
 
     clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
@@ -239,39 +229,6 @@ def _load_and_preprocess_structure_image(
     return structure_tensor, display_tensor
 
 
-def _apply_gaussian_blur(
-    images: Tensor,
-    kernel_size: int = 15,
-    sigma: float = 5.0,
-) -> Tensor:
-    """
-    Apply Gaussian blur to extract structural information.
-
-    Args:
-        images: (B, C, H, W) in [0, 1]
-
-    Returns:
-        Blurred images (B, C, H, W) in [0, 1]
-    """
-    device = images.device
-    dtype = images.dtype
-
-    x = torch.arange(kernel_size, device=device, dtype=dtype)
-    x = x - kernel_size // 2
-    gauss = torch.exp(-(x**2) / (2 * sigma**2))
-    gauss = gauss / gauss.sum()
-
-    gauss_h = gauss.view(1, 1, 1, -1).expand(3, 1, 1, -1)
-    gauss_v = gauss.view(1, 1, -1, 1).expand(3, 1, -1, 1)
-
-    pad = kernel_size // 2
-    blurred = F.pad(images, (pad, pad, pad, pad), mode="reflect")
-    blurred = F.conv2d(blurred, gauss_h, groups=3)
-    blurred = F.conv2d(blurred, gauss_v, groups=3)
-
-    return blurred.clamp(0, 1)
-
-
 def _prepare_conditioning(
     module: DiffusionModuleWithIP,
     target_labels: Tensor,
@@ -279,18 +236,16 @@ def _prepare_conditioning(
     structure_image: Tensor,
     image_scale: float = 1.0,
     leace: Optional[dict] = None,
+    zero_aoe: bool = False,
 ) -> Tensor:
     """
-    Prepare 3-segment conditioning: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)].
+    Prepare conditioning embeddings for inference.
 
-    Single conditional pass — no CFG.  Disease control is handled entirely
-    at the attention level via dynamic gates and optional delta steering.
+    When ``use_routing_gates=True``:
+        3-segment: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
 
-    Phase 1 (FeaturePurifier) runs here at inference: source_aoe is used
-    to detect and subtract disease from image embeddings *before* UNet.
-
-    Delta_AOE carries the directional disease-change signal for
-    attention-level steering.
+    When ``use_routing_gates=False``:
+        2-segment: [AOE(N) | Image(N)]
 
     Args:
         module: The diffusion module
@@ -299,15 +254,26 @@ def _prepare_conditioning(
         structure_image: CLIP-preprocessed structure image (1, 3, 224, 224)
         image_scale: Scale factor for image conditioning strength
         leace: Optional LEACE projection dict (legacy, applied before purifier)
+        zero_aoe: If True, replace AOE with ``get_negative_embedding``
+                  (unconditional pass for CFG).
 
     Returns:
-        Combined embeddings (B, num_aoe_tokens + num_image_tokens + num_delta_tokens, D)
+        Combined embeddings (B, total_tokens, D)
     """
     batch_size = target_labels.shape[0]
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
 
     target_aoe = module.ordinal_embedder(target_labels, is_training=False)
     if target_aoe.dim() == 2:
         target_aoe = target_aoe.unsqueeze(1)
+
+    # CFG unconditional pass: replace AOE with negative conditioning
+    if zero_aoe:
+        target_aoe = module.ordinal_embedder.get_negative_embedding(
+            target_labels, is_training=False
+        )
+        if target_aoe.dim() == 2:
+            target_aoe = target_aoe.unsqueeze(1)
 
     source_aoe = module.ordinal_embedder(source_labels, is_training=False)
     if source_aoe.dim() == 2:
@@ -325,13 +291,17 @@ def _prepare_conditioning(
     if image_scale != 1.0:
         image_embeds = image_embeds * image_scale
 
-    delta_embeds = module.ordinal_embedder.get_ordinal_delta_embedding(
-        source_labels, target_labels
-    )
-    if delta_embeds.dim() == 2:
-        delta_embeds = delta_embeds.unsqueeze(1)
-
-    combined = torch.cat([target_aoe, image_embeds, delta_embeds], dim=1)
+    if use_routing_gates:
+        # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+        delta_embeds = module.ordinal_embedder.get_ordinal_delta_embedding(
+            source_labels, target_labels
+        )
+        if delta_embeds.dim() == 2:
+            delta_embeds = delta_embeds.unsqueeze(1)
+        combined = torch.cat([target_aoe, image_embeds, delta_embeds], dim=1)
+    else:
+        # 2-segment: [AOE | Image]
+        combined = torch.cat([target_aoe, image_embeds], dim=1)
 
     return combined
 
@@ -357,20 +327,21 @@ def _ddim_sample_ip(
     image_scale: float = 1.0,
     leace: Optional[dict] = None,
     steer_scale: float = 0.0,
+    guidance_scale: float = 1.0,
 ) -> Tensor:
     """
-    DDIM sampling — single conditional pass, no CFG.
+    DDIM sampling with mode-aware disease control.
 
-    Disease control operates entirely at the **attention level** inside
-    ``SplitInjectionAttentionProcessor`` via severity-conditioned dynamic
-    gates and optional delta steering::
+    **Routing-gates mode** (``use_routing_gates=True``):
+        Single conditional pass.  ``steer_scale`` controls delta pathway.
+        ``guidance_scale`` is ignored.
 
-        z = anat_gate · z_anat + dis_gate · z_dis + delta_scale · z_delta
+    **Baseline mode** (``use_routing_gates=False``):
+        CFG dual-pass when ``guidance_scale != 1.0``::
 
-    No unconditional pass is needed because:
-    - Training uses ``cfg_drop_prob=0`` (no unconditional regime)
-    - Steering is at the attention level, not the noise-prediction level
-    - Single pass = 2× faster inference
+            eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+
+        Unconditional AOE uses ``get_negative_embedding``.
 
     Args:
         module: DiffusionModuleWithIP
@@ -382,11 +353,15 @@ def _ddim_sample_ip(
         eta: DDIM stochasticity (0=deterministic)
         image_scale: Scale for image conditioning
         leace: Optional LEACE projection dict
-        steer_scale: Delta pathway scale (0 disables steering)
+        steer_scale: Delta pathway scale (routing gates only; 0 disables)
+        guidance_scale: CFG scale (baseline only; 1.0 = no guidance)
 
     Returns:
         Generated latents (B, 4, H//8, W//8)
     """
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+    do_cfg = (not use_routing_gates) and (guidance_scale != 1.0)
+
     num_samples = target_labels.shape[0]
     height = module.cfg.dataset.image_size
     T = module.diff_cfg.num_train_timesteps
@@ -418,8 +393,8 @@ def _ddim_sample_ip(
         device=device,
     )
 
-    # Prepare conditional embeddings (single pass, no CFG)
-    embed = _prepare_conditioning(
+    # Prepare conditional embeddings
+    embed_cond = _prepare_conditioning(
         module,
         target_labels,
         source_labels,
@@ -428,13 +403,31 @@ def _ddim_sample_ip(
         leace=leace,
     )
 
+    # Unconditional embeddings for CFG (baseline mode only)
+    embed_uncond = None
+    if do_cfg:
+        embed_uncond = _prepare_conditioning(
+            module,
+            target_labels,
+            source_labels,
+            structure_image,
+            image_scale=image_scale,
+            leace=leace,
+            zero_aoe=True,
+        )
+
     _set_delta_scale_on_processors(module, steer_scale)
 
     for i, t_scalar in enumerate(timesteps):
         t_int = int(t_scalar.item())
         t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
 
-        eps_theta = module(latents, t, embed)
+        if do_cfg:
+            eps_cond = module(latents, t, embed_cond)
+            eps_uncond = module(latents, t, embed_uncond)
+            eps_theta = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+        else:
+            eps_theta = module(latents, t, embed_cond)
 
         alpha_bar_t = alphas_cumprod[t_int].to(device=device, dtype=latents.dtype)
         sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
@@ -585,7 +578,6 @@ def main() -> None:
     print(f"🔧 Device: {device}")
     print(f"📁 Checkpoint: {args.checkpoint}")
     print(f"🖼️  Structure image: {args.structure_image}")
-    print(f"Applying blur to structure image: {not args.no_blur}")
 
     cfg = _load_config(args.config)
 
@@ -600,14 +592,10 @@ def main() -> None:
     module.eval()
 
     print("🖼️  Processing structure image...")
-    blur_config = cfg.model
     structure_tensor, display_tensor = _load_and_preprocess_structure_image(
         args.structure_image,
         target_size=cfg.dataset.image_size,
         device=device,
-        apply_blur=not args.no_blur,
-        blur_kernel_size=getattr(blur_config, "blur_kernel_size", 15),
-        blur_sigma=getattr(blur_config, "blur_sigma", 5.0),
     )
 
     target_labels = _build_labels(
@@ -628,6 +616,18 @@ def main() -> None:
     print(f"   Image scale: {args.image_scale}")
     print(f"   Steer scale: {args.steer_scale}")
     print(f"   Sampling steps: {args.sampling_steps}")
+
+    # -- Resolve guidance scale ------------------------------------------------
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+    if args.guidance_scale is not None:
+        guidance_scale = args.guidance_scale
+    else:
+        guidance_scale = getattr(module.diff_cfg, "guidance_scale", 1.0)
+    if use_routing_gates:
+        guidance_scale = 1.0
+    print(
+        f"   use_routing_gates={use_routing_gates}  " f"guidance_scale={guidance_scale}"
+    )
 
     if args.zero_image:
         print("🔇 Zero image conditioning mode (c_img = 0, only AOE active)")
@@ -652,6 +652,7 @@ def main() -> None:
             image_scale=effective_image_scale,
             leace=leace,
             steer_scale=args.steer_scale,
+            guidance_scale=guidance_scale,
         )
 
         images = _latents_to_images(module, latents)

@@ -1,143 +1,291 @@
 """
-Evaluation pipeline for diffusion models with FID, IS, LPIPS, and class-conditional metrics.
+Comprehensive Evaluation Pipeline for IP-Adapter MES Progression Models.
 
-This module generates samples from a trained diffusion model and computes:
-- FID (Fréchet Inception Distance): Measures distribution similarity
-- IS (Inception Score): Measures quality and diversity
-- LPIPS (Learned Perceptual Image Patch Similarity): Measures perceptual diversity
-- SSIM (Structural Similarity): Measures structural similarity
-- Class-conditional FID: Per-class FID scores
+For each source image with Mayo score X, generates images for the 3 other
+MES classes (0-3 excl. X) so that every source image yields exactly
+3 generated images.  Metrics are computed **per target class** and
+**overall** (pooled).
+
+Supports sweeping over multiple checkpoints x scale values.
+Each combination creates a separate W&B run.
+
+Scale interpretation per model type
+------------------------------------
+- ``use_routing_gates=True``  -> scale = steer_scale (delta pathway),
+  guidance_scale forced to 1.0
+- ``use_routing_gates=False`` -> scale = guidance_scale (CFG),
+  steer_scale forced to 0.0.  Unconditional AOE obtained via
+  ``get_negative_embedding`` (not zeros).
+
+Metrics
+-------
+- FID   (Frechet Inception Distance)     -- distribution quality
+- CMMD  (CLIP Maximum Mean Discrepancy)  -- distribution quality via CLIP
+- IS    (Inception Score)                -- quality + diversity
+- LPIPS (perceptual distance)            -- per-class gen->real similarity
+- SSIM  (structural similarity)          -- per-class gen->real similarity
+
+Usage
+-----
+    PYTHONPATH=. python -m src.pipelines.evaluation.evaluation_pipeline \
+        --checkpoints  ckpt_noRG_noFP.ckpt  ckpt_RG_noFP.ckpt \
+                       ckpt_noRG_FP.ckpt    ckpt_RG_FP.ckpt   \
+        --configs      cfg_noRG.yaml cfg_RG.yaml cfg_noRG.yaml cfg_RG.yaml \
+        --checkpoint-names noRG_noFP RG_noFP noRG_FP RG_FP \
+        --scales 1.0 2.0 3.0 \
+        --data-root data/limuc_cleaned/test data/limuc_cleaned/val \
+        --batch-images 4
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch import Tensor
-from torch.utils.data import Dataset
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
+from tqdm import tqdm
+from transformers import CLIPImageProcessor, CLIPModel
 
-from src.models.diffusion_module import DiffusionModule
+from src.models.diffusion_module_ip import DiffusionModuleWithIP
 
-# Optional imports for metrics (will check availability)
+# -- Metric library imports ---------------------------------------------------
 try:
     from torchmetrics.image.fid import FrechetInceptionDistance
     from torchmetrics.image.inception import InceptionScore
 
     HAS_TORCHMETRICS = True
-except ImportError:
+except (ImportError, ModuleNotFoundError) as e:
     HAS_TORCHMETRICS = False
-    print(
-        "Warning: torchmetrics not installed. Install with: pip install torchmetrics[image]"
-    )
+    print(f"Warning: torchmetrics/torch-fidelity not installed: {e}")
 
 try:
-    import lpips
+    import lpips as lpips_lib
 
     HAS_LPIPS = True
 except ImportError:
     HAS_LPIPS = False
-    print("Warning: lpips not installed. Install with: pip install lpips")
+    print("Warning: lpips not installed.")
 
 try:
-    from skimage.metrics import structural_similarity as ssim
+    from skimage.metrics import structural_similarity as skimage_ssim
 
     HAS_SKIMAGE = True
 except ImportError:
     HAS_SKIMAGE = False
-    print("Warning: scikit-image not installed. Install with: pip install scikit-image")
+    print("Warning: scikit-image not installed.")
+
+try:
+    import wandb
+
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+    print("Warning: wandb not installed.")
+
+ALL_MES_CLASSES = [0, 1, 2, 3]
+IMAGE_EXTENSIONS = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+# == Data types ===============================================================
+
+
+@dataclass
+class GenerationJob:
+    """One source image -> one target MES class."""
+
+    source_path: Path
+    source_label: int
+    target_label: int
+
+
+@dataclass
+class EvalResult:
+    """Holds per-class and overall metric values."""
+
+    fid_per_class: Dict[int, float] = field(default_factory=dict)
+    cmmd_per_class: Dict[int, float] = field(default_factory=dict)
+    is_mean: float = -1.0
+    is_std: float = -1.0
+    lpips_per_class: Dict[int, float] = field(default_factory=dict)
+    ssim_per_class: Dict[int, float] = field(default_factory=dict)
+    overall_fid: float = -1.0
+    overall_cmmd: float = -1.0
+    overall_lpips: float = -1.0
+    overall_ssim: float = -1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "fid_per_class": {str(k): v for k, v in self.fid_per_class.items()},
+            "cmmd_per_class": {str(k): v for k, v in self.cmmd_per_class.items()},
+            "is_mean": self.is_mean,
+            "is_std": self.is_std,
+            "lpips_per_class": {str(k): v for k, v in self.lpips_per_class.items()},
+            "ssim_per_class": {str(k): v for k, v in self.ssim_per_class.items()},
+            "overall_fid": self.overall_fid,
+            "overall_cmmd": self.overall_cmmd,
+            "overall_lpips": self.overall_lpips,
+            "overall_ssim": self.overall_ssim,
+        }
+
+    def flat_dict(self, prefix: str = "") -> Dict[str, float]:
+        """Return a flat dict suitable for wandb.log."""
+        d: Dict[str, float] = {}
+        for cls, v in self.fid_per_class.items():
+            d[f"{prefix}fid/class_{cls}"] = v
+        for cls, v in self.cmmd_per_class.items():
+            d[f"{prefix}cmmd/class_{cls}"] = v
+        for cls, v in self.lpips_per_class.items():
+            d[f"{prefix}lpips/class_{cls}"] = v
+        for cls, v in self.ssim_per_class.items():
+            d[f"{prefix}ssim/class_{cls}"] = v
+        d[f"{prefix}fid/overall"] = self.overall_fid
+        d[f"{prefix}cmmd/overall"] = self.overall_cmmd
+        d[f"{prefix}lpips/overall"] = self.overall_lpips
+        d[f"{prefix}ssim/overall"] = self.overall_ssim
+        d[f"{prefix}is/mean"] = self.is_mean
+        d[f"{prefix}is/std"] = self.is_std
+        return d
+
+
+# == CLI ======================================================================
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Evaluate a trained diffusion model using FID, IS, LPIPS, and other metrics."
+    p = argparse.ArgumentParser(
+        description="Evaluate IP-Adapter MES progression model(s)."
     )
-    parser.add_argument(
-        "--checkpoint",
+    p.add_argument(
+        "--checkpoints",
         type=Path,
+        nargs="+",
         required=True,
-        help="Path to a Lightning checkpoint produced during training.",
+        help="One or more checkpoint paths.",
     )
-    parser.add_argument(
-        "--config",
+    p.add_argument(
+        "--checkpoint-names",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Short names for checkpoints (for W&B run id). "
+        "Defaults to parent directory names.",
+    )
+    p.add_argument(
+        "--scales",
+        type=float,
+        nargs="+",
+        default=[1.0, 2.0, 3.0],
+        help="Scale values to sweep. For routing-gates models this is "
+        "steer_scale; for baseline models this is guidance_scale (CFG).",
+    )
+    p.add_argument(
+        "--configs",
         type=Path,
-        default=Path("configs/train.yaml"),
-        help="Hydra-compatible config file describing the training setup.",
+        nargs="+",
+        default=[Path("configs/train_ip.yaml")],
+        help="Config file(s). One per checkpoint, or a single config "
+        "shared by all checkpoints.",
     )
-    parser.add_argument(
-        "--real-data-dir",
+    p.add_argument(
+        "--data-root",
         type=Path,
-        required=True,
-        help="Directory containing real images organized by class (e.g., train/0, train/1, ...).",
+        nargs="+",
+        default=[
+            Path("data/limuc_cleaned/test"),
+            Path("data/limuc_cleaned/val"),
+        ],
+        help="One or more dataset roots with sub-folders 0/ 1/ 2/ 3/. "
+        "Multiple paths are combined (e.g. test + val).",
     )
-    parser.add_argument(
+    p.add_argument(
         "--output-dir",
         type=Path,
         default=Path("outputs/evaluation"),
-        help="Directory where evaluation results and generated images are saved.",
     )
-    parser.add_argument(
-        "--num-samples-per-class",
-        type=int,
-        default=100,
-        help="Number of samples to generate per class for evaluation.",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--sampling-steps",
         type=int,
         default=50,
-        help="Number of diffusion steps used during sampling (for DDIM).",
     )
-    parser.add_argument(
-        "--sampler",
-        type=str,
-        choices=["ddpm", "ddim"],
-        default="ddim",
-        help="Sampling method to use.",
+    p.add_argument(
+        "--image-scale",
+        type=float,
+        default=1.0,
     )
-    parser.add_argument(
-        "--batch-size",
+    p.add_argument(
+        "--eta",
+        type=float,
+        default=0.0,
+    )
+    p.add_argument(
+        "--no-blur",
+        action="store_true",
+        default=True,
+        help="Skip blurring the structure image.",
+    )
+    p.add_argument(
+        "--batch-images",
         type=int,
-        default=16,
-        help="Batch size for generation and metric computation.",
+        default=4,
+        help="Source images batched together.  Effective UNet batch = "
+        "batch_images x 3 (3 target classes per source).",
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="Device used for inference (auto, cpu, cuda).",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Random seed for reproducibility.",
     )
-    parser.add_argument(
+    p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+    )
+    p.add_argument(
+        "--wandb-project",
+        type=str,
+        default="ip-adapter-evaluation",
+    )
+    p.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable W&B logging.",
+    )
+    p.add_argument(
         "--save-images",
         action="store_true",
         help="Save generated images to disk.",
     )
-    parser.add_argument(
-        "--num-classes",
+    p.add_argument(
+        "--max-images-per-class",
         type=int,
-        default=4,
-        help="Number of classes (MES scores 0-3).",
+        default=0,
+        help="Max source images per class (0 = use all).",
     )
-    return parser.parse_args()
+    p.add_argument(
+        "--num-lpips-pairs",
+        type=int,
+        default=200,
+        help="Number of random pairs for LPIPS / SSIM.",
+    )
+    return p.parse_args()
 
 
-def _resolve_device(device_str: str) -> torch.device:
-    if device_str != "auto":
-        return torch.device(device_str)
+# == Helpers ==================================================================
+
+
+def _resolve_device(s: str) -> torch.device:
+    if s != "auto":
+        return torch.device(s)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -149,335 +297,702 @@ def _set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def _load_config(config_path: Path) -> DictConfig:
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found at {config_path}")
-    return OmegaConf.load(config_path)
+def _load_config(p: Path) -> DictConfig:
+    if not p.exists():
+        raise FileNotFoundError(f"Config not found: {p}")
+    return OmegaConf.load(p)
 
 
-class RealImageDataset(Dataset):
-    """Dataset for loading real images for FID computation."""
+def _convert_to_serializable(obj: Any) -> Any:
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _convert_to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_convert_to_serializable(x) for x in obj]
+    if isinstance(obj, Path):
+        return str(obj)
+    return obj
 
-    def __init__(self, root: str, image_size: int = 256):
-        self.dataset = ImageFolder(
-            root=root,
-            transform=transforms.Compose(
-                [
-                    transforms.Resize((image_size, image_size)),
-                    transforms.ToTensor(),
-                ]
-            ),
+
+# == Image I/O (reusable CLIP processor, cached) =============================
+
+_CLIP_PROCESSOR: Optional[CLIPImageProcessor] = None
+_DISPLAY_TRANSFORM: Optional[transforms.Compose] = None
+
+
+def _init_image_pipeline(target_size: int) -> None:
+    global _CLIP_PROCESSOR, _DISPLAY_TRANSFORM
+    _CLIP_PROCESSOR = CLIPImageProcessor.from_pretrained(
+        "openai/clip-vit-large-patch14"
+    )
+    _DISPLAY_TRANSFORM = transforms.Compose(
+        [transforms.Resize((target_size, target_size)), transforms.ToTensor()]
+    )
+
+
+def _apply_gaussian_blur(
+    images: Tensor, kernel_size: int = 15, sigma: float = 5.0
+) -> Tensor:
+    dev, dt = images.device, images.dtype
+    x = torch.arange(kernel_size, device=dev, dtype=dt) - kernel_size // 2
+    g = torch.exp(-(x**2) / (2 * sigma**2))
+    g /= g.sum()
+    gh = g.view(1, 1, 1, -1).expand(3, 1, 1, -1)
+    gv = g.view(1, 1, -1, 1).expand(3, 1, -1, 1)
+    pad = kernel_size // 2
+    b = F.pad(images, (pad, pad, pad, pad), mode="reflect")
+    b = F.conv2d(b, gh, groups=3)
+    b = F.conv2d(b, gv, groups=3)
+    return b.clamp(0, 1)
+
+
+def _load_structure_image(
+    image_path: Path,
+    device: torch.device,
+    apply_blur: bool = False,
+    blur_kernel_size: int = 7,
+    blur_sigma: float = 2.0,
+) -> Tensor:
+    """Load one image -> CLIP-ready (1, 3, 224, 224) on *device*."""
+    pil = Image.open(image_path).convert("RGB")
+    display = _DISPLAY_TRANSFORM(pil)
+    if apply_blur:
+        display = _apply_gaussian_blur(
+            display.unsqueeze(0), kernel_size=blur_kernel_size, sigma=blur_sigma
+        ).squeeze(0)
+    pil_out = transforms.ToPILImage()(display)
+    clip_inputs = _CLIP_PROCESSOR(images=pil_out, return_tensors="pt", do_rescale=True)
+    return clip_inputs.pixel_values.to(device)
+
+
+def _load_real_images_for_class(
+    data_dirs: List[Path],
+    class_idx: int,
+    image_size: int,
+    max_images: int = 0,
+) -> Tensor:
+    """Load real images for a specific class from one or more data roots.
+
+    Returns (N, 3, H, W) in [0,1].
+    """
+    transform = transforms.Compose(
+        [transforms.Resize((image_size, image_size)), transforms.ToTensor()]
+    )
+    images = []
+    for data_dir in data_dirs:
+        class_dir = data_dir / str(class_idx)
+        if not class_dir.exists():
+            continue
+        for p in sorted(class_dir.iterdir()):
+            if p.suffix.lower() in IMAGE_EXTENSIONS:
+                if max_images > 0 and len(images) >= max_images:
+                    break
+                try:
+                    img = Image.open(p).convert("RGB")
+                    images.append(transform(img))
+                except Exception as e:
+                    print(f"  Warning: could not load {p}: {e}")
+    if not images:
+        raise ValueError(f"No images found for class {class_idx} in {data_dirs}")
+    return torch.stack(images)
+
+
+# == Conditioning & Sampling (matches inference_pipeline_ip.py exactly) =======
+
+
+def _prepare_conditioning(
+    module: DiffusionModuleWithIP,
+    target_labels: Tensor,
+    source_labels: Tensor,
+    structure_images: Tensor,
+    image_scale: float = 1.0,
+    zero_aoe: bool = False,
+) -> Tensor:
+    """
+    Prepare conditioning embeddings for evaluation sampling.
+
+    When ``use_routing_gates=True``:
+        3-segment: [Target_AOE | E_clean | Delta_AOE]
+
+    When ``use_routing_gates=False``:
+        2-segment: [AOE | Image]
+
+    ``structure_images`` is (B, 3, 224, 224) -- one per sample.
+
+    Args:
+        zero_aoe: If True, replace AOE with ``get_negative_embedding``
+                  (unconditional pass for CFG).  For Mayo 2, the
+                  unconditional embedding is Mayo 0's base embeddings.
+    """
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+
+    t_aoe = module.ordinal_embedder(target_labels, is_training=False)
+    if t_aoe.dim() == 2:
+        t_aoe = t_aoe.unsqueeze(1)
+
+    # CFG unconditional pass: replace AOE with negative conditioning
+    if zero_aoe:
+        t_aoe = module.ordinal_embedder.get_negative_embedding(
+            target_labels, is_training=False
         )
+        if t_aoe.dim() == 2:
+            t_aoe = t_aoe.unsqueeze(1)
 
-    def __len__(self) -> int:
-        return len(self.dataset)
+    s_aoe = module.ordinal_embedder(source_labels, is_training=False)
+    if s_aoe.dim() == 2:
+        s_aoe = s_aoe.unsqueeze(1)
 
-    def __getitem__(self, idx: int) -> Tuple[Tensor, int]:
-        return self.dataset[idx]
+    img_emb = module._get_image_embeds(structure_images)
+    if module.feature_purifier is not None:
+        img_emb = module.feature_purifier(img_emb, s_aoe)
+    if image_scale != 1.0:
+        img_emb = img_emb * image_scale
+
+    if use_routing_gates:
+        # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+        delta = module.ordinal_embedder.get_ordinal_delta_embedding(
+            source_labels, target_labels
+        )
+        if delta.dim() == 2:
+            delta = delta.unsqueeze(1)
+        return torch.cat([t_aoe, img_emb, delta], dim=1)
+    else:
+        # 2-segment: [AOE | Image]
+        return torch.cat([t_aoe, img_emb], dim=1)
 
 
-def _ddim_sample_batch(
-    module: DiffusionModule,
-    labels: Tensor,
+def _set_delta_scale(module: DiffusionModuleWithIP, scale: float) -> None:
+    """Set delta_scale on routing-gates processors (no-op for baseline processors)."""
+    for _, mod in module.unet.unet.named_modules():
+        if hasattr(mod, "processor") and hasattr(mod.processor, "delta_scale"):
+            mod.processor.delta_scale = scale
+
+
+@torch.inference_mode()
+def _ddim_sample_batched(
+    module: DiffusionModuleWithIP,
+    target_labels: Tensor,
+    source_labels: Tensor,
+    structure_images: Tensor,
     sampling_steps: int,
     device: torch.device,
     eta: float = 0.0,
+    image_scale: float = 1.0,
+    steer_scale: float = 0.0,
+    guidance_scale: float = 1.0,
 ) -> Tensor:
-    """DDIM sampling for a batch of labels."""
-    num_samples = labels.shape[0]
-    height = module.cfg.dataset.image_size
+    """
+    DDIM sampling with mode-aware disease control.
+
+    **Routing-gates** (``use_routing_gates=True``):
+        Single conditional pass.  ``steer_scale`` controls delta pathway.
+        ``guidance_scale`` is ignored.
+
+    **Baseline** (``use_routing_gates=False``):
+        CFG dual-pass when ``guidance_scale != 1.0``::
+
+            eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+
+        Unconditional AOE uses ``get_negative_embedding`` (not zeros).
+    """
+    use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+    do_cfg = (not use_routing_gates) and (guidance_scale != 1.0)
+
+    B = target_labels.shape[0]
+    H = module.cfg.dataset.image_size
     T = module.diff_cfg.num_train_timesteps
-    guidance_scale = module.diff_cfg.guidance_scale
+    C = module.cfg.model.latent_channels
 
-    latents = torch.randn(
-        num_samples,
-        module.cfg.model.latent_channels,
-        height // 8,
-        height // 8,
-        device=device,
-        dtype=torch.float32,
+    latents = torch.randn(B, C, H // 8, H // 8, device=device, dtype=torch.float32)
+    ac = module.alphas_cumprod
+    ts = torch.linspace(T - 1, 0, steps=sampling_steps, dtype=torch.long, device=device)
+
+    embed_cond = _prepare_conditioning(
+        module,
+        target_labels,
+        source_labels,
+        structure_images,
+        image_scale=image_scale,
     )
 
-    alphas_cumprod = module.alphas_cumprod
-
-    timesteps = torch.linspace(
-        T - 1,
-        0,
-        steps=sampling_steps,
-        dtype=torch.long,
-        device=device,
-    )
-
-    # FIX: Pass is_training=False during inference
-    con_embed = module.ordinal_embedder(labels, is_training=False, unconditional=False)
-    uncond_embed = module.ordinal_embedder(
-        labels, is_training=False, unconditional=True
-    )
-    embed = torch.cat([uncond_embed, con_embed], dim=0)
-
-    for i, t_scalar in enumerate(timesteps):
-        t_int = int(t_scalar.item())
-        t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
-
-        latent_model_input = torch.cat([latents, latents], dim=0)
-        t_model_input = torch.cat([t, t], dim=0)
-
-        noise_pred = module(latent_model_input, t_model_input, embed)
-        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-
-        eps_theta = noise_pred_uncond + guidance_scale * (
-            noise_pred_cond - noise_pred_uncond
+    embed_uncond = None
+    if do_cfg:
+        embed_uncond = _prepare_conditioning(
+            module,
+            target_labels,
+            source_labels,
+            structure_images,
+            image_scale=image_scale,
+            zero_aoe=True,
         )
 
-        alpha_bar_t = alphas_cumprod[t_int].to(
-            device=latents.device, dtype=latents.dtype
-        )
+    _set_delta_scale(module, steer_scale)
+
+    for i, t_s in enumerate(ts):
+        ti = int(t_s.item())
+        t = torch.full((B,), ti, dtype=torch.long, device=device)
+
+        if do_cfg:
+            eps_cond = module(latents, t, embed_cond)
+            eps_uncond = module(latents, t, embed_uncond)
+            eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+        else:
+            eps = module(latents, t, embed_cond)
+
+        ab = ac[ti].to(device=device, dtype=latents.dtype)
+        sa = torch.sqrt(ab)
+        so = torch.sqrt(1.0 - ab)
+
+        x0 = ((latents - so * eps) / sa).clamp(-4.0, 4.0)
 
         if i == sampling_steps - 1:
-            alpha_bar_prev = torch.tensor(
-                1.0, device=latents.device, dtype=latents.dtype
-            )
-        else:
-            t_prev_int = int(timesteps[i + 1].item())
-            alpha_bar_prev = alphas_cumprod[t_prev_int].to(
-                device=latents.device, dtype=latents.dtype
-            )
+            latents = x0
+            continue
 
-        sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
-        sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - alpha_bar_t)
-
-        x0_pred = (latents - sqrt_one_minus_alpha_bar_t * eps_theta) / sqrt_alpha_bar_t
-
-        sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
-        sqrt_one_minus_alpha_bar_prev = torch.sqrt(1.0 - alpha_bar_prev)
+        tp = int(ts[i + 1].item())
+        abp = ac[tp].to(device=device, dtype=latents.dtype)
+        sap = torch.sqrt(abp)
+        sop = torch.sqrt(1.0 - abp)
 
         if eta == 0.0:
-            latents = (
-                sqrt_alpha_bar_prev * x0_pred
-                + sqrt_one_minus_alpha_bar_prev * eps_theta
-            )
+            latents = sap * x0 + sop * eps
         else:
-            sigma = eta * torch.sqrt(
-                (1 - alpha_bar_prev)
-                / (1 - alpha_bar_t)
-                * (1 - alpha_bar_t / alpha_bar_prev)
-            )
+            sigma = eta * torch.sqrt((1 - abp) / (1 - ab) * (1 - ab / abp))
             noise = torch.randn_like(latents)
-            latents = (
-                sqrt_alpha_bar_prev * x0_pred
-                + torch.sqrt(1 - alpha_bar_prev - sigma**2) * eps_theta
-                + sigma * noise
-            )
+            latents = sap * x0 + torch.sqrt(1 - abp - sigma**2) * eps + sigma * noise
 
     return latents
 
 
-def _latents_to_images(module: DiffusionModule, latents: Tensor) -> Tensor:
-    """Decode latents with the frozen SD VAE and map to [0, 1] RGB."""
-    with torch.no_grad():
-        scaled = latents / module.diff_cfg.latent_scale
-        decoded = module.vae.decode(scaled)
-
-    if hasattr(decoded, "sample"):
-        images = decoded.sample
-    else:
-        images = decoded
-
-    images = images.clamp(-1.0, 1.0)
-    images = (images + 1.0) / 2.0
-    return images.clamp(0.0, 1.0)
+@torch.inference_mode()
+def _decode_latents(module: DiffusionModuleWithIP, latents: Tensor) -> Tensor:
+    """Decode latents -> [0, 1] RGB (B, 3, H, W) on CPU."""
+    scaled = latents / module.diff_cfg.latent_scale
+    decoded = module.vae.decode(scaled)
+    imgs = decoded.sample if hasattr(decoded, "sample") else decoded
+    imgs = imgs.float().clamp(-1.0, 1.0)
+    return ((imgs + 1.0) / 2.0).clamp(0.0, 1.0).cpu()
 
 
-def generate_samples_for_class(
-    module: DiffusionModule,
-    class_label: float,
-    num_samples: int,
-    batch_size: int,
-    sampling_steps: int,
-    device: torch.device,
-) -> List[Tensor]:
-    """Generate samples for a specific class label."""
-    all_images = []
-    num_batches = (num_samples + batch_size - 1) // batch_size
-
-    for batch_idx in range(num_batches):
-        current_batch_size = min(batch_size, num_samples - batch_idx * batch_size)
-        labels = torch.full(
-            (current_batch_size,), class_label, device=device, dtype=torch.float32
-        )
-
-        with torch.no_grad():
-            latents = _ddim_sample_batch(module, labels, sampling_steps, device)
-            images = _latents_to_images(module, latents)
-
-        all_images.append(images.cpu())
-
-    return torch.cat(all_images, dim=0)[:num_samples]
+# == Metrics ==================================================================
 
 
-def compute_fid(
-    real_images: Tensor,
-    fake_images: Tensor,
-    device: torch.device,
-) -> float:
-    """Compute FID between real and fake images."""
+def compute_fid(real: Tensor, fake: Tensor, device: torch.device) -> float:
+    """FID between real and generated images (both [0, 1] float, NCHW)."""
     if not HAS_TORCHMETRICS:
-        print("Skipping FID: torchmetrics not installed")
         return -1.0
-
-    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
-
-    # Images should be in [0, 1] range and uint8 format for FID
-    real_uint8 = (real_images * 255).to(torch.uint8)
-    fake_uint8 = (fake_images * 255).to(torch.uint8)
-
-    # Process in batches to avoid OOM
-    batch_size = 32
-    for i in range(0, len(real_uint8), batch_size):
-        batch = real_uint8[i : i + batch_size].to(device)
-        fid.update(batch, real=True)
-
-    for i in range(0, len(fake_uint8), batch_size):
-        batch = fake_uint8[i : i + batch_size].to(device)
-        fid.update(batch, real=False)
-
-    return fid.compute().item()
+    fid_metric = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    bs = 32
+    for i in range(0, len(real), bs):
+        fid_metric.update(real[i : i + bs].to(device), real=True)
+    for i in range(0, len(fake), bs):
+        fid_metric.update(fake[i : i + bs].to(device), real=False)
+    return fid_metric.compute().item()
 
 
 def compute_inception_score(
-    images: Tensor,
-    device: torch.device,
+    images: Tensor, device: torch.device
 ) -> Tuple[float, float]:
-    """Compute Inception Score for generated images."""
+    """Inception Score for generated images."""
     if not HAS_TORCHMETRICS:
-        print("Skipping IS: torchmetrics not installed")
         return -1.0, -1.0
-
     inception = InceptionScore(normalize=True).to(device)
-
-    images_uint8 = (images * 255).to(torch.uint8)
-
-    batch_size = 32
-    for i in range(0, len(images_uint8), batch_size):
-        batch = images_uint8[i : i + batch_size].to(device)
-        inception.update(batch)
-
+    bs = 32
+    for i in range(0, len(images), bs):
+        inception.update(images[i : i + bs].to(device))
     mean, std = inception.compute()
     return mean.item(), std.item()
 
 
-def compute_lpips_diversity(
-    images: Tensor,
+def compute_lpips(
+    real: Tensor,
+    fake: Tensor,
     device: torch.device,
-    num_pairs: int = 100,
+    num_pairs: int = 200,
 ) -> float:
-    """Compute average LPIPS distance between random pairs (measures diversity)."""
+    """Average LPIPS between random (real, generated) pairs."""
     if not HAS_LPIPS:
-        print("Skipping LPIPS: lpips not installed")
         return -1.0
-
-    lpips_fn = lpips.LPIPS(net="alex").to(device)
+    lpips_fn = lpips_lib.LPIPS(net="alex").to(device)
     lpips_fn.eval()
 
-    n = len(images)
-    if n < 2:
-        return 0.0
-
-    # Random pairs
-    indices = torch.randperm(n)[: min(num_pairs * 2, n)]
-    if len(indices) % 2 == 1:
-        indices = indices[:-1]
-
-    pairs_a = indices[: len(indices) // 2]
-    pairs_b = indices[len(indices) // 2 :]
-
-    distances = []
-    with torch.no_grad():
-        for a, b in zip(pairs_a, pairs_b):
-            img_a = images[a : a + 1].to(device) * 2 - 1  # [0,1] -> [-1,1]
-            img_b = images[b : b + 1].to(device) * 2 - 1
-            dist = lpips_fn(img_a, img_b)
-            distances.append(dist.item())
-
-    return np.mean(distances)
-
-
-def compute_ssim_to_real(
-    real_images: Tensor,
-    fake_images: Tensor,
-    num_comparisons: int = 100,
-) -> float:
-    """Compute average SSIM between generated and random real images."""
-    if not HAS_SKIMAGE:
-        print("Skipping SSIM: scikit-image not installed")
+    n_real, n_fake = len(real), len(fake)
+    if n_real == 0 or n_fake == 0:
         return -1.0
 
-    n_real = len(real_images)
-    n_fake = len(fake_images)
+    num_pairs = min(num_pairs, n_real, n_fake)
+    real_idx = torch.randperm(n_real)[:num_pairs]
+    fake_idx = torch.randperm(n_fake)[:num_pairs]
 
-    ssim_values = []
-    for _ in range(min(num_comparisons, n_fake)):
-        real_idx = np.random.randint(0, n_real)
-        fake_idx = np.random.randint(0, n_fake)
-
-        real_np = real_images[real_idx].permute(1, 2, 0).numpy()
-        fake_np = fake_images[fake_idx].permute(1, 2, 0).numpy()
-
-        ssim_val = ssim(
-            real_np, fake_np, multichannel=True, channel_axis=2, data_range=1.0
-        )
-        ssim_values.append(ssim_val)
-
-    return np.mean(ssim_values)
+    dists = []
+    with torch.no_grad():
+        for a, b in zip(real_idx, fake_idx):
+            r = real[a : a + 1].to(device) * 2 - 1  # [0,1] -> [-1,1]
+            f = fake[b : b + 1].to(device) * 2 - 1
+            dists.append(lpips_fn(r, f).item())
+    return float(np.mean(dists))
 
 
-def save_images(
+def compute_ssim(
+    real: Tensor,
+    fake: Tensor,
+    num_pairs: int = 200,
+) -> float:
+    """Average SSIM between random (real, generated) pairs."""
+    if not HAS_SKIMAGE:
+        return -1.0
+    n_real, n_fake = len(real), len(fake)
+    if n_real == 0 or n_fake == 0:
+        return -1.0
+    num_pairs = min(num_pairs, n_real, n_fake)
+
+    vals = []
+    for _ in range(num_pairs):
+        ri = np.random.randint(0, n_real)
+        fi = np.random.randint(0, n_fake)
+        r_np = real[ri].permute(1, 2, 0).numpy()
+        f_np = fake[fi].permute(1, 2, 0).numpy()
+        vals.append(skimage_ssim(r_np, f_np, channel_axis=2, data_range=1.0))
+    return float(np.mean(vals))
+
+
+# -- CMMD (CLIP Maximum Mean Discrepancy) ------------------------------------
+
+
+def _extract_clip_features(
     images: Tensor,
-    labels: List[float],
-    output_dir: Path,
-    prefix: str = "gen",
-) -> None:
-    """Save generated images to disk."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for idx, (image, label) in enumerate(zip(images, labels)):
-        array = (image.permute(1, 2, 0).mul(255).to(torch.uint8)).numpy()
-        pil_image = Image.fromarray(array)
-        filename = output_dir / f"{prefix}_class{int(label)}_{idx:04d}.png"
-        pil_image.save(filename)
-
-
-def load_real_images_for_class(
-    data_dir: Path,
-    class_idx: int,
-    image_size: int,
-    max_images: int = 1000,
+    clip_model: CLIPModel,
+    clip_processor: CLIPImageProcessor,
+    device: torch.device,
+    batch_size: int = 32,
 ) -> Tensor:
-    """Load real images for a specific class."""
-    class_dir = data_dir / str(class_idx)
-    if not class_dir.exists():
-        raise FileNotFoundError(f"Class directory not found: {class_dir}")
+    """Extract CLIP image features.  Returns (N, D) normalised vectors."""
+    all_feats = []
+    for i in range(0, len(images), batch_size):
+        batch = images[i : i + batch_size]
+        # Convert tensors to PIL for CLIP processing
+        pil_images = []
+        for img in batch:
+            arr = (img.permute(1, 2, 0).mul(255).to(torch.uint8)).numpy()
+            pil_images.append(Image.fromarray(arr))
 
-    transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-        ]
-    )
+        inputs = clip_processor(images=pil_images, return_tensors="pt", do_rescale=True)
+        pixel_values = inputs.pixel_values.to(device)
 
-    images = []
-    extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]
+        with torch.no_grad():
+            vision_out = clip_model.vision_model(pixel_values=pixel_values)
+            feats = clip_model.visual_projection(vision_out.pooler_output)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        all_feats.append(feats.cpu())
+    return torch.cat(all_feats, dim=0)
 
-    for img_path in class_dir.iterdir():
-        if img_path.suffix.lower() in extensions and len(images) < max_images:
-            img = Image.open(img_path).convert("RGB")
-            img_tensor = transform(img)
-            images.append(img_tensor)
 
-    if not images:
-        raise ValueError(f"No images found in {class_dir}")
+def _mmd_rbf(x: Tensor, y: Tensor, sigmas: Optional[List[float]] = None) -> float:
+    """
+    Compute MMD-squared with sum of RBF kernels (unbiased estimator).
 
-    return torch.stack(images)
+    Args:
+        x: (N, D) features for distribution P (real)
+        y: (M, D) features for distribution Q (generated)
+        sigmas: kernel bandwidths.
+
+    Returns:
+        MMD-squared estimate (float).
+    """
+    if sigmas is None:
+        sigmas = [0.1, 1.0, 10.0, 100.0]
+
+    n, m = x.shape[0], y.shape[0]
+    if n < 2 or m < 2:
+        return -1.0
+
+    # Squared pairwise distances
+    xx = torch.cdist(x, x, p=2).pow(2)
+    yy = torch.cdist(y, y, p=2).pow(2)
+    xy = torch.cdist(x, y, p=2).pow(2)
+
+    mmd2 = 0.0
+    for sigma in sigmas:
+        gamma = 1.0 / (2.0 * sigma**2)
+        kxx = torch.exp(-gamma * xx)
+        kyy = torch.exp(-gamma * yy)
+        kxy = torch.exp(-gamma * xy)
+
+        # Unbiased: exclude diagonal for k(x,x) and k(y,y)
+        kxx_sum = (kxx.sum() - kxx.diagonal().sum()) / (n * (n - 1))
+        kyy_sum = (kyy.sum() - kyy.diagonal().sum()) / (m * (m - 1))
+        kxy_sum = kxy.sum() / (n * m)
+
+        mmd2 += float(kxx_sum + kyy_sum - 2 * kxy_sum)
+
+    return mmd2
+
+
+def compute_cmmd(
+    real: Tensor,
+    fake: Tensor,
+    device: torch.device,
+    max_samples: int = 1000,
+) -> float:
+    """
+    Compute CMMD between real and generated image sets.
+
+    Uses CLIP ViT-L/14 features + RBF kernel MMD.
+    """
+    clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
+    clip_model.eval()
+    clip_proc = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+
+    # Sub-sample if too large
+    if len(real) > max_samples:
+        idx = torch.randperm(len(real))[:max_samples]
+        real = real[idx]
+    if len(fake) > max_samples:
+        idx = torch.randperm(len(fake))[:max_samples]
+        fake = fake[idx]
+
+    real_feats = _extract_clip_features(real, clip_model, clip_proc, device)
+    fake_feats = _extract_clip_features(fake, clip_model, clip_proc, device)
+
+    # Free GPU memory
+    del clip_model
+    torch.cuda.empty_cache()
+
+    return _mmd_rbf(real_feats, fake_feats)
+
+
+# == Generation engine -- balanced, batched ===================================
+
+
+def _collect_jobs(
+    data_roots: List[Path], max_per_class: int = 0
+) -> List[GenerationJob]:
+    """
+    Collect generation jobs from one or more data roots so that every
+    source image produces images for the 3 *other* MES classes.
+    """
+    jobs: List[GenerationJob] = []
+    for data_root in data_roots:
+        for cls in ALL_MES_CLASSES:
+            cls_dir = data_root / str(cls)
+            if not cls_dir.is_dir():
+                continue
+            paths = sorted(
+                p for p in cls_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if max_per_class > 0:
+                paths = paths[:max_per_class]
+            for p in paths:
+                for target in ALL_MES_CLASSES:
+                    if target != cls:
+                        jobs.append(GenerationJob(p, cls, target))
+    return jobs
+
+
+@torch.inference_mode()
+def generate_all(
+    module: DiffusionModuleWithIP,
+    jobs: List[GenerationJob],
+    cfg: DictConfig,
+    device: torch.device,
+    batch_images: int = 4,
+    sampling_steps: int = 50,
+    image_scale: float = 1.0,
+    steer_scale: float = 0.0,
+    guidance_scale: float = 1.0,
+    eta: float = 0.0,
+    apply_blur: bool = False,
+    seed: int = 42,
+) -> Dict[int, Tensor]:
+    """
+    Generate all jobs, returning {target_class: (N, 3, H, W)} tensors.
+
+    Batches multiple jobs together for efficient GPU utilisation.
+    Model is NOT reloaded -- it must be on *device* and in eval mode.
+
+    For baseline models (``use_routing_gates=False``) ``guidance_scale``
+    controls CFG strength.  For routing-gates models ``steer_scale``
+    controls the delta pathway.
+    """
+    blur_cfg = cfg.model
+    bk = getattr(blur_cfg, "blur_kernel_size", 7)
+    bs_sigma = getattr(blur_cfg, "blur_sigma", 2.0)
+
+    # Sort jobs by source path so same-source jobs are adjacent
+    jobs_sorted = sorted(jobs, key=lambda j: (str(j.source_path), j.target_label))
+
+    # Bucket by source path
+    source_buckets: OrderedDict[Path, List[GenerationJob]] = OrderedDict()
+    for j in jobs_sorted:
+        source_buckets.setdefault(j.source_path, []).append(j)
+
+    source_list = list(source_buckets.items())
+    total_jobs = len(jobs)
+
+    # Pre-allocate result lists per target class
+    result_lists: Dict[int, List[Tensor]] = {c: [] for c in ALL_MES_CLASSES}
+
+    pbar = tqdm(total=total_jobs, desc="Generating", unit="img")
+    src_idx = 0
+
+    while src_idx < len(source_list):
+        batch_sources = source_list[src_idx : src_idx + batch_images]
+        src_idx += len(batch_sources)
+
+        _set_seed(seed)
+
+        # Flatten into one big batch
+        all_targets: List[int] = []
+        all_sources: List[float] = []
+        all_structs: List[Tensor] = []
+        job_target_labels: List[int] = []
+
+        for src_path, src_jobs in batch_sources:
+            struct = _load_structure_image(
+                src_path,
+                device,
+                apply_blur=apply_blur,
+                blur_kernel_size=bk,
+                blur_sigma=bs_sigma,
+            )  # (1, 3, 224, 224)
+            for j in src_jobs:
+                all_targets.append(j.target_label)
+                all_sources.append(float(j.source_label))
+                all_structs.append(struct)
+                job_target_labels.append(j.target_label)
+
+        B = len(all_targets)
+        target_labels = torch.tensor(all_targets, dtype=torch.float32, device=device)
+        source_labels = torch.tensor(all_sources, dtype=torch.float32, device=device)
+        structure_images = torch.cat(all_structs, dim=0)  # (B, 3, 224, 224)
+
+        latents = _ddim_sample_batched(
+            module,
+            target_labels,
+            source_labels,
+            structure_images,
+            sampling_steps=sampling_steps,
+            device=device,
+            eta=eta,
+            image_scale=image_scale,
+            steer_scale=steer_scale,
+            guidance_scale=guidance_scale,
+        )
+        images = _decode_latents(module, latents)  # (B, 3, H, W) on CPU
+
+        for k in range(B):
+            result_lists[job_target_labels[k]].append(images[k : k + 1])
+
+        pbar.update(B)
+
+    pbar.close()
+
+    # Concatenate per target class
+    results: Dict[int, Tensor] = {}
+    for cls in ALL_MES_CLASSES:
+        if result_lists[cls]:
+            results[cls] = torch.cat(result_lists[cls], dim=0)
+        else:
+            results[cls] = torch.zeros(
+                0, 3, cfg.dataset.image_size, cfg.dataset.image_size
+            )
+
+    return results
+
+
+# == Main evaluation loop =====================================================
+
+
+def evaluate_one_run(
+    generated: Dict[int, Tensor],
+    real: Dict[int, Tensor],
+    device: torch.device,
+    num_lpips_pairs: int = 200,
+) -> EvalResult:
+    """Compute all metrics for one steer-scale run."""
+    result = EvalResult()
+
+    # -- Per-class metrics ----------------------------------------------------
+    all_gen = []
+    all_real = []
+
+    for cls in ALL_MES_CLASSES:
+        gen_cls = generated.get(cls)
+        real_cls = real.get(cls)
+        if gen_cls is None or len(gen_cls) == 0:
+            print(f"  Class {cls}: no generated images, skipping.")
+            continue
+        if real_cls is None or len(real_cls) == 0:
+            print(f"  Class {cls}: no real images, skipping.")
+            continue
+
+        print(f"  Class {cls}: {len(gen_cls)} generated vs {len(real_cls)} real")
+
+        # FID
+        print("    Computing FID ...")
+        result.fid_per_class[cls] = compute_fid(real_cls, gen_cls, device)
+        print(f"    FID = {result.fid_per_class[cls]:.2f}")
+
+        # CMMD
+        print("    Computing CMMD ...")
+        result.cmmd_per_class[cls] = compute_cmmd(real_cls, gen_cls, device)
+        print(f"    CMMD = {result.cmmd_per_class[cls]:.6f}")
+
+        # LPIPS
+        print("    Computing LPIPS ...")
+        result.lpips_per_class[cls] = compute_lpips(
+            real_cls, gen_cls, device, num_pairs=num_lpips_pairs
+        )
+        print(f"    LPIPS = {result.lpips_per_class[cls]:.4f}")
+
+        # SSIM
+        print("    Computing SSIM ...")
+        result.ssim_per_class[cls] = compute_ssim(
+            real_cls, gen_cls, num_pairs=num_lpips_pairs
+        )
+        print(f"    SSIM = {result.ssim_per_class[cls]:.4f}")
+
+        all_gen.append(gen_cls)
+        all_real.append(real_cls)
+
+    # -- Overall metrics ------------------------------------------------------
+    if all_gen and all_real:
+        gen_all = torch.cat(all_gen, dim=0)
+        real_all = torch.cat(all_real, dim=0)
+
+        print(f"  Overall: {len(gen_all)} generated vs {len(real_all)} real")
+
+        print("  Computing overall FID ...")
+        result.overall_fid = compute_fid(real_all, gen_all, device)
+        print(f"    Overall FID = {result.overall_fid:.2f}")
+
+        print("  Computing overall CMMD ...")
+        result.overall_cmmd = compute_cmmd(real_all, gen_all, device)
+        print(f"    Overall CMMD = {result.overall_cmmd:.6f}")
+
+        print("  Computing overall LPIPS ...")
+        result.overall_lpips = compute_lpips(
+            real_all, gen_all, device, num_pairs=num_lpips_pairs * 2
+        )
+        print(f"    Overall LPIPS = {result.overall_lpips:.4f}")
+
+        print("  Computing overall SSIM ...")
+        result.overall_ssim = compute_ssim(
+            real_all, gen_all, num_pairs=num_lpips_pairs * 2
+        )
+        print(f"    Overall SSIM = {result.overall_ssim:.4f}")
+
+        # IS (on generated only)
+        print("  Computing Inception Score ...")
+        result.is_mean, result.is_std = compute_inception_score(gen_all, device)
+        print(f"    IS = {result.is_mean:.2f} +/- {result.is_std:.2f}")
+
+    return result
 
 
 def main() -> None:
@@ -485,155 +1000,260 @@ def main() -> None:
     device = _resolve_device(args.device)
     _set_seed(args.seed)
 
-    cfg = _load_config(args.config)
+    n_ckpts = len(args.checkpoints)
 
-    print(f"Loading checkpoint: {args.checkpoint}")
-    module = DiffusionModule.load_from_checkpoint(
-        str(args.checkpoint),
-        cfg=cfg,
-    )
-    module = module.to(device)
-    module = module.to(torch.float32)
-    module.eval()
-
-    # Create output directory
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Results dictionary
-    results = {
-        "checkpoint": str(args.checkpoint),
-        "num_samples_per_class": args.num_samples_per_class,
-        "sampling_steps": args.sampling_steps,
-        "sampler": args.sampler,
-        "seed": args.seed,
-        "metrics": {},
-    }
-
-    all_fake_images = []
-    all_real_images = []
-    all_labels = []
-
-    print("\n=== Generating samples and computing metrics ===")
-
-    # Per-class metrics
-    for class_idx in range(args.num_classes):
-        print(f"\nProcessing class {class_idx}...")
-
-        # Generate fake images
-        print(f"  Generating {args.num_samples_per_class} samples...")
-        fake_images = generate_samples_for_class(
-            module=module,
-            class_label=float(class_idx),
-            num_samples=args.num_samples_per_class,
-            batch_size=args.batch_size,
-            sampling_steps=args.sampling_steps,
-            device=device,
+    # -- Resolve per-checkpoint configs ----------------------------------------
+    if len(args.configs) == 1:
+        configs = [_load_config(args.configs[0])] * n_ckpts
+    elif len(args.configs) == n_ckpts:
+        configs = [_load_config(p) for p in args.configs]
+    else:
+        raise ValueError(
+            f"--configs must be 1 (shared) or {n_ckpts} (per checkpoint), "
+            f"got {len(args.configs)}"
         )
 
-        # Load real images
-        print("  Loading real images...")
+    image_size = configs[0].dataset.image_size
+
+    # Resolve checkpoint names
+    ckpt_names = args.checkpoint_names
+    if ckpt_names is None:
+        ckpt_names = [p.parent.parent.name for p in args.checkpoints]
+    if len(ckpt_names) != n_ckpts:
+        raise ValueError(
+            f"Number of checkpoint names ({len(ckpt_names)}) must match "
+            f"number of checkpoints ({n_ckpts})"
+        )
+
+    # Init image pipeline
+    _init_image_pipeline(image_size)
+
+    # -- Collect generation jobs (test + val combined) -------------------------
+    data_roots = args.data_root  # List[Path] now
+    print(f"\nCollecting images from {[str(d) for d in data_roots]} ...")
+    jobs = _collect_jobs(data_roots, max_per_class=args.max_images_per_class)
+    n_sources = len(set(j.source_path for j in jobs))
+    print(
+        f"  {n_sources} source images -> {len(jobs)} generation jobs " f"(3 per source)"
+    )
+
+    # -- Load real images (done once, combined from all roots) -----------------
+    print("\nLoading real images ...")
+    real_images: Dict[int, Tensor] = {}
+    for cls in ALL_MES_CLASSES:
         try:
-            real_images = load_real_images_for_class(
-                data_dir=args.real_data_dir,
-                class_idx=class_idx,
-                image_size=cfg.dataset.image_size,
-                max_images=args.num_samples_per_class * 2,
-            )
+            real_images[cls] = _load_real_images_for_class(data_roots, cls, image_size)
+            print(f"  Class {cls}: {len(real_images[cls])} real images")
         except (FileNotFoundError, ValueError) as e:
-            print(f"  Warning: {e}")
-            real_images = None
+            print(f"  Class {cls}: {e}")
 
-        # Save images if requested
-        if args.save_images:
-            save_images(
-                fake_images,
-                [float(class_idx)] * len(fake_images),
-                args.output_dir / f"class_{class_idx}",
-                prefix="gen",
+    # -- Main loop: checkpoint x scale -----------------------------------------
+    all_results: Dict[str, EvalResult] = {}
+
+    for ckpt_idx, (ckpt_path, ckpt_name) in enumerate(
+        zip(args.checkpoints, ckpt_names)
+    ):
+        ckpt_cfg = configs[ckpt_idx]
+
+        print(f"\n{'=' * 60}")
+        print(f"CHECKPOINT: {ckpt_name}  ({ckpt_path})")
+        print(f"{'=' * 60}")
+
+        # Load model ONCE per checkpoint
+        print("Loading model ...")
+        module = DiffusionModuleWithIP.load_from_checkpoint(
+            str(ckpt_path),
+            cfg=ckpt_cfg,
+            weights_only=False,
+        )
+        module = module.to(device).to(torch.float32)
+        module.eval()
+
+        use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
+        use_feature_purifier = module.feature_purifier is not None
+        mode_str = (
+            f"routing_gates={use_routing_gates}, "
+            f"feature_purifier={use_feature_purifier}"
+        )
+        print(f"  Mode: {mode_str}")
+
+        for scale_val in args.scales:
+            # Interpret scale based on model mode
+            if use_routing_gates:
+                steer_scale = scale_val
+                guidance_scale = 1.0
+                scale_label = f"steer{scale_val:.2f}"
+            else:
+                steer_scale = 0.0
+                guidance_scale = scale_val
+                scale_label = f"cfg{scale_val:.2f}"
+
+            run_name = f"{ckpt_name}_{scale_label}"
+            print(
+                f"\n--- Scale: {scale_val}  "
+                f"(steer={steer_scale}, cfg={guidance_scale})  "
+                f"run: {run_name} ---"
             )
 
-        # Compute per-class metrics
-        class_metrics = {}
+            # Init W&B run
+            wb_run = None
+            if HAS_WANDB and not args.no_wandb:
+                wb_run = wandb.init(
+                    project=args.wandb_project,
+                    name=run_name,
+                    config={
+                        "checkpoint": str(ckpt_path),
+                        "checkpoint_name": ckpt_name,
+                        "use_routing_gates": use_routing_gates,
+                        "use_feature_purifier": use_feature_purifier,
+                        "scale": scale_val,
+                        "steer_scale": steer_scale,
+                        "guidance_scale": guidance_scale,
+                        "image_scale": args.image_scale,
+                        "sampling_steps": args.sampling_steps,
+                        "eta": args.eta,
+                        "seed": args.seed,
+                        "batch_images": args.batch_images,
+                        "num_source_images": n_sources,
+                        "num_jobs": len(jobs),
+                        "blur": not args.no_blur,
+                        "data_roots": [str(d) for d in data_roots],
+                    },
+                    reinit=True,
+                )
 
-        if real_images is not None:
-            print("  Computing FID...")
-            class_fid = compute_fid(real_images, fake_images, device)
-            class_metrics["fid"] = class_fid
-            print(f"    FID: {class_fid:.2f}")
+            t0 = time.time()
 
-            print("  Computing SSIM...")
-            class_ssim = compute_ssim_to_real(real_images, fake_images)
-            class_metrics["ssim"] = class_ssim
-            print(f"    SSIM: {class_ssim:.4f}")
+            # Generate
+            generated = generate_all(
+                module=module,
+                jobs=jobs,
+                cfg=ckpt_cfg,
+                device=device,
+                batch_images=args.batch_images,
+                sampling_steps=args.sampling_steps,
+                image_scale=args.image_scale,
+                steer_scale=steer_scale,
+                guidance_scale=guidance_scale,
+                eta=args.eta,
+                apply_blur=not args.no_blur,
+                seed=args.seed,
+            )
+            gen_time = time.time() - t0
+            total_gen = sum(len(v) for v in generated.values())
+            print(
+                f"  Generated {total_gen} images in {gen_time:.1f}s "
+                f"({total_gen / max(gen_time, 0.001):.1f} img/s)"
+            )
 
-            all_real_images.append(real_images)
+            # Save images if requested
+            if args.save_images:
+                save_dir = args.output_dir / run_name
+                for cls, imgs in generated.items():
+                    cls_dir = save_dir / str(cls)
+                    cls_dir.mkdir(parents=True, exist_ok=True)
+                    for idx, img in enumerate(imgs):
+                        arr = (img.permute(1, 2, 0).mul(255).to(torch.uint8)).numpy()
+                        Image.fromarray(arr).save(cls_dir / f"gen_{idx:04d}.png")
 
-        print("  Computing Inception Score...")
-        is_mean, is_std = compute_inception_score(fake_images, device)
-        class_metrics["inception_score_mean"] = is_mean
-        class_metrics["inception_score_std"] = is_std
-        print(f"    IS: {is_mean:.2f} ± {is_std:.2f}")
+            # Compute metrics
+            print("\nComputing metrics ...")
+            result = evaluate_one_run(
+                generated,
+                real_images,
+                device,
+                num_lpips_pairs=args.num_lpips_pairs,
+            )
+            elapsed = time.time() - t0
 
-        print("  Computing LPIPS diversity...")
-        lpips_div = compute_lpips_diversity(fake_images, device)
-        class_metrics["lpips_diversity"] = lpips_div
-        print(f"    LPIPS diversity: {lpips_div:.4f}")
+            # Log to W&B
+            if wb_run is not None:
+                log_dict = result.flat_dict()
+                log_dict["generation_time_s"] = gen_time
+                log_dict["total_time_s"] = elapsed
+                log_dict["num_generated"] = total_gen
+                wandb.log(log_dict)
+                wandb.finish()
 
-        results["metrics"][f"class_{class_idx}"] = class_metrics
+            # Save JSON
+            run_dir = args.output_dir / run_name
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result_path = run_dir / "metrics.json"
+            with open(result_path, "w") as f:
+                json.dump(
+                    _convert_to_serializable(
+                        {
+                            "checkpoint": str(ckpt_path),
+                            "checkpoint_name": ckpt_name,
+                            "use_routing_gates": use_routing_gates,
+                            "use_feature_purifier": use_feature_purifier,
+                            "scale": scale_val,
+                            "steer_scale": steer_scale,
+                            "guidance_scale": guidance_scale,
+                            "metrics": result.to_dict(),
+                            "elapsed_s": elapsed,
+                        }
+                    ),
+                    f,
+                    indent=2,
+                )
+            print(f"  Saved metrics to {result_path}")
 
-        all_fake_images.append(fake_images)
-        all_labels.extend([float(class_idx)] * len(fake_images))
+            all_results[run_name] = result
 
-    # Compute overall metrics
-    print("\n=== Computing overall metrics ===")
+            # Print summary
+            print(f"\n  SUMMARY ({run_name}):")
+            print(f"    Overall FID  = {result.overall_fid:.2f}")
+            print(f"    Overall CMMD = {result.overall_cmmd:.6f}")
+            print(f"    Overall LPIPS= {result.overall_lpips:.4f}")
+            print(f"    Overall SSIM = {result.overall_ssim:.4f}")
+            print(f"    IS           = {result.is_mean:.2f} +/- {result.is_std:.2f}")
+            for cls in ALL_MES_CLASSES:
+                if cls in result.fid_per_class:
+                    print(
+                        f"    Class {cls}: FID={result.fid_per_class[cls]:.2f}  "
+                        f"CMMD={result.cmmd_per_class.get(cls, -1):.6f}  "
+                        f"LPIPS={result.lpips_per_class.get(cls, -1):.4f}  "
+                        f"SSIM={result.ssim_per_class.get(cls, -1):.4f}"
+                    )
+            print(f"    Time: {elapsed:.1f}s")
 
-    all_fake = torch.cat(all_fake_images, dim=0)
+        # Unload model to free VRAM before next checkpoint
+        del module
+        torch.cuda.empty_cache()
 
-    if all_real_images:
-        all_real = torch.cat(all_real_images, dim=0)
-
-        print("Computing overall FID...")
-        overall_fid = compute_fid(all_real, all_fake, device)
-        results["metrics"]["overall_fid"] = overall_fid
-        print(f"  Overall FID: {overall_fid:.2f}")
-
-        print("Computing overall SSIM...")
-        overall_ssim = compute_ssim_to_real(all_real, all_fake)
-        results["metrics"]["overall_ssim"] = overall_ssim
-        print(f"  Overall SSIM: {overall_ssim:.4f}")
-
-    print("Computing overall Inception Score...")
-    overall_is_mean, overall_is_std = compute_inception_score(all_fake, device)
-    results["metrics"]["overall_inception_score_mean"] = overall_is_mean
-    results["metrics"]["overall_inception_score_std"] = overall_is_std
-    print(f"  Overall IS: {overall_is_mean:.2f} ± {overall_is_std:.2f}")
-
-    print("Computing overall LPIPS diversity...")
-    overall_lpips = compute_lpips_diversity(all_fake, device, num_pairs=200)
-    results["metrics"]["overall_lpips_diversity"] = overall_lpips
-    print(f"  Overall LPIPS diversity: {overall_lpips:.4f}")
-
-    # Save results
-    results_path = args.output_dir / "evaluation_results.json"
-    with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to {results_path}")
-
-    # Print summary
-    print("\n" + "=" * 50)
-    print("EVALUATION SUMMARY")
-    print("=" * 50)
-    if "overall_fid" in results["metrics"]:
-        print(f"Overall FID: {results['metrics']['overall_fid']:.2f}")
-    print(
-        f"Overall IS: {results['metrics']['overall_inception_score_mean']:.2f} ± {results['metrics']['overall_inception_score_std']:.2f}"
+    # -- Final comparison table ------------------------------------------------
+    print(f"\n{'=' * 70}")
+    print("COMPARISON TABLE")
+    print(f"{'=' * 70}")
+    header = (
+        f"{'Run':<40} {'FID':>8} {'CMMD':>10} {'IS':>8} " f"{'LPIPS':>8} {'SSIM':>8}"
     )
-    print(
-        f"Overall LPIPS Diversity: {results['metrics']['overall_lpips_diversity']:.4f}"
-    )
-    if "overall_ssim" in results["metrics"]:
-        print(f"Overall SSIM: {results['metrics']['overall_ssim']:.4f}")
-    print("=" * 50)
+    print(header)
+    print("-" * len(header))
+    for name, r in all_results.items():
+        print(
+            f"{name:<40} "
+            f"{r.overall_fid:>8.2f} "
+            f"{r.overall_cmmd:>10.6f} "
+            f"{r.is_mean:>8.2f} "
+            f"{r.overall_lpips:>8.4f} "
+            f"{r.overall_ssim:>8.4f}"
+        )
+    print(f"{'=' * 70}")
+
+    # Save comparison JSON
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    comparison_path = args.output_dir / "comparison.json"
+    with open(comparison_path, "w") as f:
+        json.dump(
+            _convert_to_serializable(
+                {name: r.to_dict() for name, r in all_results.items()}
+            ),
+            f,
+            indent=2,
+        )
+    print(f"\nComparison saved to {comparison_path}")
 
 
 if __name__ == "__main__":

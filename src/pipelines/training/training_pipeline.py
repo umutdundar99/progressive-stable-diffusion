@@ -68,7 +68,7 @@ def main(cfg: DictConfig) -> None:
         deterministic=False,
         enable_checkpointing=True,
         accumulate_grad_batches=cfg.training.get("accumulate_grad_batches", 1),
-        benchmark=True,  # Enable cudnn.benchmark for faster training
+        benchmark=True,
     )
 
     trainer.fit(model=diffusion, datamodule=datamodule)
