@@ -4,7 +4,7 @@ This repository implements the **Disentangled Anatomy-Disease Diffusion (DADD)**
 
 ## Architecture Overview
 
-![Architecture Diagram](paper/figures/pipeline.png)
+![Architecture Diagram](docs/figures/pipeline.png)
 
 The framework resolves the inherent entanglement of patient anatomy and pathological textures by forcing anatomy and disease embeddings to interact.
 
@@ -28,7 +28,7 @@ where $\mathbf{\Delta}$ parameterizes the Delta Steering intensity.
 
 ## Disease Progression Comparison: DADD vs IP-AOE
 
-![Model Comparison](paper/figures/model_comparison_ours.png)
+![Model Comparison](docs/figures/model_comparison_ours.png)
 
 *Comparison demonstrating the difference between the baseline IP-AOE (with guidance weight $w=3$) and our proposed DADD approach (with target delta scalar $\lambda=3$). DADD maintains robust consistency in the structural layout (e.g. mucosal folds) while successfully rendering severity shifts.*
 
