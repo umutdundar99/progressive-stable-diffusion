@@ -14,18 +14,6 @@ The framework resolves the inherent entanglement of patient anatomy and patholog
 2. **Frequency-Aware Triple-Pathway Cross-Attention:** A split-injection attention mechanism with fixed frequency-aware routing gates across U-Net layers. It confines disease edits to fine-texture scales while preserving structural identity.
 3. **Delta Steering:** A training-free, single-pass alternative to Classifier-Free Guidance (CFG). This signal is derived from the projected AOE difference and provides signed, magnitude-proportional control over severity shifts.
 
-### Formulation Highlights
-
-Let $\mathbf{e}_{\text{img}}$ be the image tokens containing both anatomy and source disease $D_s$. By querying these against the source disease embedding $\mathbf{e}_{\text{aoe}}^{\text{s}}$, we identify the disease component:
-$$ \mathbf{d} = \text{CrossAttn}\bigl(Q=\text{LN}(\mathbf{e}_{\text{img}}), K=V=\text{LN}(\mathbf{e}_{\text{aoe}}^{\text{s}})\bigr) $$
-
-A per-dimension gating mask $\mathbf{g}$ suppresses this from the image tokens to yield purified anatomy tokens $\mathbf{e}_{\text{clean}}$:
-$$ \mathbf{e}_{\text{clean}} = \text{LN}\bigl(\mathbf{e}_{\text{img}} - \mathbf{g} \odot \mathbf{d}\bigr) $$
-
-The final conditioning context fed to the U-Net concatenated to control generation is:
-$$ \mathbf{C} = \big[\,\mathbf{e}_{\text{aoe}}^{\text{t}}\;\|\;\mathbf{e}_{\text{clean}}\;\|\;\mathbf{\Delta}\,\big] $$
-where $\mathbf{\Delta}$ parameterizes the Delta Steering intensity.
-
 ## Disease Progression Comparison: DADD vs IP-AOE
 
 ![Model Comparison](docs/figures/model_comparison_ours.png)
