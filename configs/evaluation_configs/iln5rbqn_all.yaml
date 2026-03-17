@@ -25,8 +25,10 @@ model:
   use_blur: False
   use_frequency_strategy: true
 
-  use_routing_gates: false
+  use_routing_gates: true
   use_feature_purifier: true
+  gate_init_anatomy: [0.5, 0.5]
+  gate_init_disease: [0.5, 0.5]
 
   purifier_num_heads: 8
   purifier_ff_mult: 2
@@ -52,7 +54,7 @@ scheduler:
   min_lr: 1e-6
 
 dataset:
-  dataset_path: data/limuc_cleaned
+  dataset_path: dataset/limuc_cleaned
   batch_size: 64
   num_workers: 24
   persistent_workers: true

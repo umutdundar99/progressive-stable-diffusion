@@ -9,12 +9,6 @@ import torch.nn.functional as F
 from diffusers.models.attention_processor import AttnProcessor2_0
 
 
-def _logit(p: float) -> float:
-    """Inverse sigmoid: returns x such that sigmoid(x) = p."""
-    p = max(min(p, 0.9999), 0.0001)
-    return math.log(p / (1.0 - p))
-
-
 class SplitInjectionAttentionProcessor(nn.Module):
     """Triple-pathway cross-attention with learnable per-block routing.
 
@@ -27,7 +21,7 @@ class SplitInjectionAttentionProcessor(nn.Module):
     num_image_tokens : int
         Number of anatomy (E_clean) tokens per sample.
     num_aoe_tokens : int
-        Number of disease (Target_AOE) tokens per sample.
+        Number of disease (Source_AOE) tokens per sample.
     num_delta_tokens : int
         Number of delta steering (Delta_AOE) tokens per sample.
     block_type : ``"anatomy"`` | ``"disease"`` | ``"both"``
@@ -65,8 +59,8 @@ class SplitInjectionAttentionProcessor(nn.Module):
         self.delta_scale = delta_scale
 
         _defaults: dict[str, tuple[float, float]] = {
-            "anatomy": (0.9, 0.1),
-            "disease": (0.1, 0.9),
+            "anatomy": (0.5, 0.5),
+            "disease": (0.5, 0.5),
             "both": (0.5, 0.5),
         }
         a_init = (
@@ -76,8 +70,9 @@ class SplitInjectionAttentionProcessor(nn.Module):
             dis_gate_init if dis_gate_init is not None else _defaults[block_type][1]
         )
 
-        self.anat_gate_logit = nn.Parameter(torch.tensor(_logit(a_init)))
-        self.dis_gate_logit = nn.Parameter(torch.tensor(_logit(d_init)))
+        # Fixed (non-learnable) gate weights
+        self.register_buffer("anat_gate", torch.tensor(a_init))
+        self.register_buffer("dis_gate", torch.tensor(d_init))
 
         self.to_k_dis = nn.Linear(
             cross_attention_dim or hidden_size, hidden_size, bias=False
@@ -85,11 +80,6 @@ class SplitInjectionAttentionProcessor(nn.Module):
         self.to_v_dis = nn.Linear(
             cross_attention_dim or hidden_size, hidden_size, bias=False
         )
-
-        _mod_dim = cross_attention_dim or hidden_size
-        self.gate_modulator = nn.Linear(_mod_dim, 1)
-        nn.init.zeros_(self.gate_modulator.weight)
-        nn.init.zeros_(self.gate_modulator.bias)
 
     def __call__(
         self,
@@ -167,13 +157,6 @@ class SplitInjectionAttentionProcessor(nn.Module):
         attn_probs_dis = F.softmax(attn_weights_dis, dim=-1)
         z_dis = torch.matmul(attn_probs_dis, v_dis)
 
-        severity_signal = dis_tokens.mean(dim=1)
-        shift = self.gate_modulator(severity_signal)
-        shift = shift.view(batch_size, 1, 1, 1)
-
-        anat_gate = torch.sigmoid(self.anat_gate_logit - shift)
-        dis_gate = torch.sigmoid(self.dis_gate_logit + shift)
-
         if self.delta_scale != 0.0:
             k_delta = self.to_k_dis(delta_tokens)
             v_delta = self.to_v_dis(delta_tokens)
@@ -186,9 +169,13 @@ class SplitInjectionAttentionProcessor(nn.Module):
             attn_probs_delta = F.softmax(attn_weights_delta, dim=-1)
             z_delta = torch.matmul(attn_probs_delta, v_delta)
 
-            z_final = anat_gate * z_anat + dis_gate * z_dis + self.delta_scale * z_delta
+            z_final = (
+                self.anat_gate * z_anat
+                + self.dis_gate * z_dis
+                + self.delta_scale * z_delta
+            )
         else:
-            z_final = anat_gate * z_anat + dis_gate * z_dis
+            z_final = self.anat_gate * z_anat + self.dis_gate * z_dis
 
         hidden_states = z_final.transpose(1, 2).reshape(
             batch_size, -1, attn.heads * head_dim
@@ -212,35 +199,33 @@ class SplitInjectionAttentionProcessor(nn.Module):
 def get_block_type(block_name: str) -> str:
     """Assign ``anatomy`` or ``disease`` role based on UNet block position.
 
-    Low-resolution blocks (coarse, global structure) → ``anatomy``
-    High-resolution blocks (fine, texture/colour)    → ``disease``
+    Disease (MES severity) is a global colour/texture shift visible even at
+    low resolution, so low-res blocks receive the disease role.
+    Anatomy (patient-specific fold patterns, vasculature) requires fine
+    spatial detail, so high-res blocks receive the anatomy role.
 
     SD 1.x UNet layout (256×256 input → 32×32 latent)::
 
-        down_blocks.0  320  32×32  cross-attn  → disease  (high-res)
-        down_blocks.1  640  16×16  cross-attn  → disease  (medium-res)
-        down_blocks.2  1280  8×8   cross-attn  → anatomy  (low-res)
-        mid_block      1280  8×8   cross-attn  → anatomy  (bottleneck)
-        up_blocks.1    1280  8×8   cross-attn  → anatomy  (low-res)
-        up_blocks.2    640  16×16  cross-attn  → disease  (medium-res)
-        up_blocks.3    320  32×32  cross-attn  → disease  (high-res)
+        down_blocks.0  320  32×32  cross-attn  → anatomy  (high-res, fine detail)
+        down_blocks.1  640  16×16  cross-attn  → anatomy  (medium-res)
+        down_blocks.2  1280  8×8   cross-attn  → disease  (low-res, global)
+        mid_block      1280  8×8   cross-attn  → disease  (bottleneck, global)
+        up_blocks.1    1280  8×8   cross-attn  → disease  (low-res, global)
+        up_blocks.2    640  16×16  cross-attn  → anatomy  (medium-res)
+        up_blocks.3    320  32×32  cross-attn  → anatomy  (high-res, fine detail)
     """
     if "mid_block" in block_name:
-        return "anatomy"
+        return "disease"
 
     if "down_blocks" in block_name:
-        try:
-            idx = int(block_name.split("down_blocks.")[1].split(".")[0])
-        except (IndexError, ValueError):
-            return "both"
-        return "anatomy" if idx >= 2 else "disease"
+        idx = int(block_name.split("down_blocks.")[1].split(".")[0])
+
+        return "disease" if idx >= 2 else "anatomy"
 
     if "up_blocks" in block_name:
-        try:
-            idx = int(block_name.split("up_blocks.")[1].split(".")[0])
-        except (IndexError, ValueError):
-            return "both"
-        return "anatomy" if idx <= 1 else "disease"
+        idx = int(block_name.split("up_blocks.")[1].split(".")[0])
+
+        return "disease" if idx <= 1 else "anatomy"
 
     return "both"
 
@@ -252,16 +237,30 @@ def set_split_injection_processors(
     num_delta_tokens: int = 16,
     use_frequency_strategy: bool = True,
     delta_scale: float = 0.0,
+    gate_inits: Optional[dict[str, tuple[float, float]]] = None,
 ) -> dict:
     """Replace cross-attention processors with :class:`SplitInjectionAttentionProcessor`.
 
     Self-attention layers (``attn1``) keep the default ``AttnProcessor2_0``.
     Cross-attention layers (``attn2``) get the triple-pathway processor with
-    learnable gates initialised by block type and a non-learnable ``delta_scale``.
+    fixed gate weights and a non-learnable ``delta_scale``.
+
+    Parameters
+    ----------
+    gate_inits : dict, optional
+        Mapping ``block_type -> (anat_gate, dis_gate)``.  When *None* every
+        block gets ``(0.5, 0.5)``.
 
     After installation the disease K/V weights are **warm-started** from the
     pretrained text K/V to prevent early collapse.
     """
+    if gate_inits is None:
+        gate_inits = {
+            "anatomy": (0.5, 0.5),
+            "disease": (0.5, 0.5),
+            "both": (0.5, 0.5),
+        }
+
     attn_procs: dict = {}
 
     for name in unet.attn_processors.keys():
@@ -287,7 +286,10 @@ def set_split_injection_processors(
             attn_procs[name] = AttnProcessor2_0()
         else:
             block_type: str = get_block_type(name) if use_frequency_strategy else "both"
-
+            a_init, d_init = gate_inits.get(block_type, (0.5, 0.5))
+            print(
+                f"Setting {name} as {block_type}-role with anat_gate={a_init}, dis_gate={d_init}, delta_scale={delta_scale}"
+            )
             processor = SplitInjectionAttentionProcessor(
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_attention_dim,
@@ -295,6 +297,8 @@ def set_split_injection_processors(
                 num_aoe_tokens=num_aoe_tokens,
                 num_delta_tokens=num_delta_tokens,
                 block_type=block_type,  # type: ignore[arg-type]
+                anat_gate_init=a_init,
+                dis_gate_init=d_init,
                 delta_scale=delta_scale,
             )
             attn_procs[name] = processor

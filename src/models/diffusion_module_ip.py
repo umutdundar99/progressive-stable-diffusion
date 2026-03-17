@@ -54,6 +54,14 @@ class DiffusionIPConfig:
     purifier_ff_mult: int = 2
     delta_scale: float = 0.0
     use_routing_gates: bool = True
+    gate_init_anatomy: tuple = (
+        0.5,
+        0.5,
+    )
+    gate_init_disease: tuple = (
+        0.5,
+        0.5,
+    )
 
 
 class DiffusionModuleWithIP(pl.LightningModule):
@@ -100,6 +108,12 @@ class DiffusionModuleWithIP(pl.LightningModule):
             purifier_ff_mult=getattr(cfg.model, "purifier_ff_mult", 2),
             delta_scale=getattr(cfg.model, "delta_scale", 0.0),
             use_routing_gates=getattr(cfg.model, "use_routing_gates", True),
+            gate_init_anatomy=tuple(
+                getattr(cfg.model, "gate_init_anatomy", [0.5, 0.5])
+            ),
+            gate_init_disease=tuple(
+                getattr(cfg.model, "gate_init_disease", [0.5, 0.5])
+            ),
         )
 
         # VAE (FROZEN)
@@ -174,9 +188,6 @@ class DiffusionModuleWithIP(pl.LightningModule):
             "alphas_cumprod_prev", alphas_cumprod_prev, persistent=False
         )
 
-        self.blur_kernel_size = cfg.model["blur_kernel_size"]
-        self.blur_sigma = cfg.model["blur_sigma"]
-
         # For Min-SNR computation
         snr_values = alphas_cumprod / (1.0 - alphas_cumprod + 1e-8)
         self.register_buffer("snr_values", snr_values, persistent=False)
@@ -199,6 +210,11 @@ class DiffusionModuleWithIP(pl.LightningModule):
         """
         unet = self.unet.unet
         if self.diff_cfg.use_routing_gates:
+            gate_inits = {
+                "anatomy": self.diff_cfg.gate_init_anatomy,
+                "disease": self.diff_cfg.gate_init_disease,
+                "both": (0.5, 0.5),
+            }
             set_split_injection_processors(
                 unet=unet,
                 num_image_tokens=self.diff_cfg.num_image_tokens,
@@ -206,6 +222,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
                 num_delta_tokens=self.diff_cfg.num_aoe_tokens,
                 use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
                 delta_scale=self.diff_cfg.delta_scale,
+                gate_inits=gate_inits,
             )
         else:
             set_ordinal_ip_attention_processors(
@@ -324,8 +341,8 @@ class DiffusionModuleWithIP(pl.LightningModule):
         Prepare conditioning embeddings for the UNet.
 
         When ``use_routing_gates=True`` (split-injection):
-            Returns 3-segment: (target_aoe, cleaned_image, delta) — each (B, N, D)
-            Layout: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
+            Returns 3-segment: (source_aoe, cleaned_image, delta) — each (B, N, D)
+            Layout: [Source_AOE(N) | E_clean(N) | Delta_AOE(N)]
 
         When ``use_routing_gates=False`` (baseline):
             Returns 2-segment: (aoe, image) — each (B, N, D)
@@ -341,7 +358,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
         Returns:
             Tuple of embedding segments
         """
-        # Target AOE: the desired disease severity
+        # Source AOE: severity of the input image (= target during training)
         aoe_embeds = self.ordinal_embedder(labels, is_training=is_training)
         if aoe_embeds.dim() == 2:
             aoe_embeds = aoe_embeds.unsqueeze(1)
@@ -352,11 +369,11 @@ class DiffusionModuleWithIP(pl.LightningModule):
         # Phase 1: FeaturePurifier — disease erasure at embedding level
         # During training, source_aoe == target_aoe (same label)
         if self.feature_purifier is not None:
-            source_aoe = aoe_embeds  # same as target during training
-            image_embeds = self.feature_purifier(image_embeds, source_aoe)
+            image_embeds = self.feature_purifier(image_embeds, aoe_embeds)
 
         if self.diff_cfg.use_routing_gates:
-            # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+            # 3-segment: [Source_AOE | E_clean | Delta_AOE]
+            # source == target during training → delta = 0
             delta_embeds = torch.zeros_like(aoe_embeds)
             return aoe_embeds, image_embeds, delta_embeds
         else:
@@ -406,7 +423,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
         )
 
         if self.diff_cfg.use_routing_gates:
-            # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+            # 3-segment: [Source_AOE | E_clean | Delta_AOE]
             aoe_embeds, image_embeds, delta_embeds = cond_parts
         else:
             # 2-segment: [AOE | Image]
@@ -421,13 +438,12 @@ class DiffusionModuleWithIP(pl.LightningModule):
         image_embeds = torch.where(drop_mask_expanded, zero_image_embeds, image_embeds)
 
         if self.diff_cfg.use_routing_gates:
-            # 3-segment layout: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
+            # 3-segment layout: [Source_AOE(N) | E_clean(N) | Delta_AOE(N)]
             combined_embeds = torch.cat([aoe_embeds, image_embeds, delta_embeds], dim=1)
         else:
             # 2-segment layout: [AOE(N) | Image(N)]
             combined_embeds = torch.cat([aoe_embeds, image_embeds], dim=1)
 
-        # ── Diffusion loss ──
         noise_pred = self.unet(noisy_latents, t, combined_embeds)
 
         base_loss = F.mse_loss(noise_pred, noise, reduction="none")
@@ -445,16 +461,52 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
         return loss
 
+    def _collect_gate_values(self) -> Dict[str, Dict[str, float]]:
+        """Collect fixed gate values from every SplitInjectionAttentionProcessor."""
+        from .attention_processor_routing_gates import SplitInjectionAttentionProcessor
+
+        gate_values: Dict[str, Dict[str, float]] = {}
+        for name, module in self.unet.unet.named_modules():
+            if hasattr(module, "processor") and isinstance(
+                module.processor, SplitInjectionAttentionProcessor
+            ):
+                proc = module.processor
+                gate_values[name] = {
+                    "anat_gate": proc.anat_gate.item(),
+                    "dis_gate": proc.dis_gate.item(),
+                }
+        return gate_values
+
+    def on_train_epoch_end(self) -> None:
+        """Log per-block gate values to wandb at the end of each epoch."""
+        if not self.diff_cfg.use_routing_gates:
+            return
+
+        gate_values = self._collect_gate_values()
+        if not gate_values:
+            return
+
+        anat_all, dis_all = [], []
+        for block_name, vals in gate_values.items():
+            short = block_name.replace(".attentions.", ".attn.")
+            self.log(f"gates/{short}/anat", vals["anat_gate"], on_epoch=True)
+            self.log(f"gates/{short}/dis", vals["dis_gate"], on_epoch=True)
+            anat_all.append(vals["anat_gate"])
+            dis_all.append(vals["dis_gate"])
+
+        self.log("gates/mean_anat", sum(anat_all) / len(anat_all), on_epoch=True)
+        self.log("gates/mean_dis", sum(dis_all) / len(dis_all), on_epoch=True)
+
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configure optimizer with separate learning rates."""
         opt_cfg = self.cfg.optimizer
 
-        # Group parameters with different learning rates
         params = [
             {"params": self.unet.parameters(), "lr": opt_cfg.lr},
             {"params": self.ordinal_embedder.parameters(), "lr": opt_cfg.lr},
             {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 2},
         ]
+
         if self.feature_purifier is not None:
             params.append(
                 {"params": self.feature_purifier.parameters(), "lr": opt_cfg.lr * 2}

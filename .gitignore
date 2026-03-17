@@ -207,7 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 train_and_validation_sets
-data
+dataset
 prog-*
 outputs*
 markdowns
@@ -220,3 +220,9 @@ condition_images
 scripts
 paper
 checkpoints
+deneme*
+intro_mayo*
+test_judge*
+paper_spie
+ip_adapter
+inference_pipeline_ip_with_guidance_ignore

@@ -44,9 +44,6 @@ class FeaturePurifier(nn.Module):
         super().__init__()
         self.dim = dim
 
-        # ── Disease detection via cross-attention ──
-        # Query = image tokens, Key/Value = source AOE tokens
-        # Output = disease component present in each image token
         self.norm_img = nn.LayerNorm(dim)
         self.norm_aoe = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(
@@ -55,9 +52,6 @@ class FeaturePurifier(nn.Module):
             batch_first=True,
         )
 
-        # ── Channel-wise gate ──
-        # Decides per-dimension how strongly to erase disease.
-        # Input: concat(disease_component, e_img) → gate ∈ (0, 1)
         self.gate = nn.Sequential(
             nn.Linear(dim * 2, dim * ff_mult),
             nn.GELU(),
@@ -65,7 +59,6 @@ class FeaturePurifier(nn.Module):
             nn.Sigmoid(),
         )
 
-        # ── Output normalisation ──
         self.norm_out = nn.LayerNorm(dim)
 
     def forward(
@@ -84,25 +77,19 @@ class FeaturePurifier(nn.Module):
         Returns:
             Cleaned image tokens ``(B, N_img, D)``.
         """
-        # Normalise inputs for stable attention
-        img_normed = self.norm_img(image_embeds)  # (B, N_img, D)
-        aoe_normed = self.norm_aoe(source_aoe)  # (B, N_aoe, D)
 
-        # Cross-attention: image tokens query the source disease embedding
-        # → extracts what disease information is present in the image tokens
+        img_normed = self.norm_img(image_embeds)
+        aoe_normed = self.norm_aoe(source_aoe)
+
         disease_component, _ = self.cross_attn(
             query=img_normed,
             key=aoe_normed,
             value=aoe_normed,
-        )  # (B, N_img, D)
+        )
 
-        # Gate: learn which channels to erase
-        gate_input = torch.cat(
-            [disease_component, img_normed], dim=-1
-        )  # (B, N_img, 2D)
-        mask = self.gate(gate_input)  # (B, N_img, D) ∈ (0, 1)
+        gate_input = torch.cat([disease_component, img_normed], dim=-1)
+        mask = self.gate(gate_input)
 
-        # Residual subtraction: erase disease component
         e_clean = image_embeds - mask * disease_component
 
         return self.norm_out(e_clean)

@@ -1,12 +1,17 @@
 """
-Training script for MES Classification with ResNet.
+Training script for MES Regression with ResNet.
+
+Trains a ResNet-18 regression model on real LIMUC data.
+Used as a "judge" to evaluate synthetic image quality.
 
 Usage:
-    python -m src.classification.train --config configs/train_classifier.yaml
+    python -m src.classification.train_regression \
+        --config configs/train_classifier_regression.yaml
 
-    # Override config values:
-    python -m src.classification.train --config configs/train_classifier.yaml \
-        --batch-size 64 --lr 0.0001 --epochs 50
+    # Test-only with existing checkpoint:
+    python -m src.classification.train_regression \
+        --config configs/train_classifier_regression.yaml \
+        --test-only --resume outputs/classifier_regression/last.ckpt
 """
 
 from __future__ import annotations
@@ -20,7 +25,9 @@ import pytorch_lightning as pl
 import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.callbacks import (
+    EarlyStopping,
     LearningRateMonitor,
+    ModelCheckpoint,
     TQDMProgressBar,
 )
 from pytorch_lightning.loggers import WandbLogger
@@ -28,83 +35,42 @@ from pytorch_lightning.loggers import WandbLogger
 torch.load = partial(torch.load, weights_only=False)
 
 from src.classification.dataset import MESDataModule
-from src.classification.model import ResNetClassifier
+from src.classification.model_regression import ResNetRegressor
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train ResNet classifier for MES classification."
+        description="Train ResNet regressor for MES scoring (judge model)."
     )
-
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/train_classifier.yaml"),
-        help="Path to configuration file.",
+        default=Path("configs/train_classifier_regression.yaml"),
     )
-
-    # Override arguments
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        help="Override batch size from config.",
-    )
-    parser.add_argument(
-        "--lr",
-        "--learning-rate",
-        type=float,
-        dest="learning_rate",
-        help="Override learning rate from config.",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        help="Override max epochs from config.",
-    )
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--lr", "--learning-rate", type=float, dest="learning_rate")
+    parser.add_argument("--epochs", type=int)
     parser.add_argument(
         "--model",
         type=str,
         choices=["resnet18", "resnet34", "resnet50", "resnet101"],
-        help="Override model architecture.",
     )
+    parser.add_argument("--data-root", type=Path)
+    parser.add_argument("--experiment-name", type=str)
     parser.add_argument(
-        "--data-root",
-        type=Path,
-        help="Override data root directory.",
+        "--seed", type=int, help="Override dataset balancing seed only."
     )
-    parser.add_argument(
-        "--experiment-name",
-        type=str,
-        help="Override experiment name for logging.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        help="Override dataset balancing seed only.",
-    )
-    parser.add_argument(
-        "--resume",
-        type=Path,
-        help="Path to checkpoint to resume training from.",
-    )
-    parser.add_argument(
-        "--test-only",
-        action="store_true",
-        help="Only run testing on a trained model.",
-    )
-
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--test-only", action="store_true")
     return parser.parse_args()
 
 
 def load_config(config_path: Path, args: argparse.Namespace) -> DictConfig:
-    """Load and merge configuration with command line overrides."""
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     cfg = OmegaConf.load(config_path)
 
-    # Apply command line overrides
     if args.batch_size is not None:
         cfg.training.batch_size = args.batch_size
     if args.learning_rate is not None:
@@ -121,52 +87,43 @@ def load_config(config_path: Path, args: argparse.Namespace) -> DictConfig:
 
 
 def setup_callbacks(cfg: DictConfig) -> list:
-    """Set up training callbacks."""
     callbacks = []
 
-    # Model checkpoint
     checkpoint_dir = Path(cfg.checkpoint.dirpath)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     checkpoint_dir = checkpoint_dir / timestamp
 
-    # callbacks.append(
-    # ModelCheckpoint(
-    #         dirpath=checkpoint_dir,
-    #         filename=cfg.checkpoint.filename,
-    #         monitor=cfg.logging.monitor_metric,
-    #         mode=cfg.logging.monitor_mode,
-    #         save_top_k=cfg.logging.save_top_k,
-    #         save_last=True,
-    #         verbose=True,
-    #     )
-    # )
+    callbacks.append(
+        ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            filename=cfg.checkpoint.filename,
+            monitor=cfg.logging.monitor_metric,
+            mode=cfg.logging.monitor_mode,
+            save_top_k=cfg.logging.save_top_k,
+            save_last=True,
+            verbose=True,
+        )
+    )
 
-    # Early stopping
+    callbacks.append(
+        EarlyStopping(
+            monitor=cfg.logging.monitor_metric,
+            mode=cfg.logging.monitor_mode,
+            patience=cfg.early_stopping.patience,
+            min_delta=cfg.early_stopping.min_delta,
+            verbose=True,
+        )
+    )
 
-    # callbacks.append(
-    #     EarlyStopping(
-    #         monitor=cfg.logging.monitor_metric,
-    #         mode=cfg.logging.monitor_mode,
-    #         patience=cfg.early_stopping.patience,
-    #         min_delta=cfg.early_stopping.min_delta,
-    #         verbose=True,
-    #     )
-    # )
-
-    # Learning rate monitor
     callbacks.append(LearningRateMonitor(logging_interval="epoch"))
-
-    # Progress bar
     callbacks.append(TQDMProgressBar(refresh_rate=10))
 
     return callbacks
 
 
 def setup_logger(cfg: DictConfig) -> WandbLogger | None:
-    """Set up wandb logger."""
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = cfg.logging.experiment_name
+    run_name = f"{cfg.logging.experiment_name}_{timestamp}"
 
     logger = WandbLogger(
         project=cfg.logging.project_name,
@@ -176,17 +133,15 @@ def setup_logger(cfg: DictConfig) -> WandbLogger | None:
         log_model=False,
         offline=cfg.logging.offline,
     )
-
     return logger
 
 
 def main() -> None:
-    """Main training function."""
     args = parse_args()
     cfg = load_config(args.config, args)
 
     print("=" * 60)
-    print("MES Classification Training")
+    print("MES Regression Training (Judge Model)")
     print("=" * 60)
     print(OmegaConf.to_yaml(cfg))
     print("=" * 60)
@@ -201,35 +156,18 @@ def main() -> None:
         num_workers=cfg.dataset.num_workers,
         pin_memory=cfg.dataset.pin_memory,
         augmentation_cfg=OmegaConf.to_container(cfg.augmentation, resolve=True),
-        use_weighted_sampler=True,
+        use_weighted_sampler=False,
         balance_seed=args.seed if args.seed is not None else 4,
     )
 
-    data_module.setup("fit")
-    class_weights = data_module.get_class_weights()
-
-    if class_weights is not None:
-        print(f"\n⚖️  Class weights: {class_weights.tolist()}")
-
-    if cfg.training.class_weights is not None:
-        class_weights = torch.tensor(cfg.training.class_weights, dtype=torch.float32)
-        print(f"📝 Using config-specified class weights: {class_weights.tolist()}")
-
-    print("\n🧠 Setting up model...")
+    print("\n🧠 Setting up regression model...")
     if args.resume and not args.test_only:
         print(f"📂 Resuming from checkpoint: {args.resume}")
-        model = ResNetClassifier.load_from_checkpoint(
-            str(args.resume),
-            cfg=cfg,
-            class_weights=class_weights,
-        )
+        model = ResNetRegressor.load_from_checkpoint(str(args.resume), cfg=cfg)
     else:
-        model = ResNetClassifier(cfg=cfg, class_weights=class_weights)
+        model = ResNetRegressor(cfg=cfg)
 
     print(f"   Model: {cfg.model.name}")
-    print(f"   Pretrained: {cfg.model.pretrained}")
-    print(f"   Num classes: {cfg.model.num_classes}")
-
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"   Total parameters: {total_params:,}")
@@ -255,17 +193,13 @@ def main() -> None:
     if args.test_only:
         if args.resume is None:
             raise ValueError("--resume must be specified for --test-only mode")
-
         print("\n🧪 Running test evaluation...")
-        model = ResNetClassifier.load_from_checkpoint(
-            str(args.resume),
-            cfg=cfg,
-            class_weights=class_weights,
-        )
+        model = ResNetRegressor.load_from_checkpoint(str(args.resume), cfg=cfg)
         data_module.setup("test")
         trainer.test(model, datamodule=data_module)
     else:
         print("\n🚀 Starting training...")
+        data_module.setup("fit")
         trainer.fit(model, datamodule=data_module)
 
         print("\n🧪 Running final test evaluation...")
@@ -274,7 +208,7 @@ def main() -> None:
             model, datamodule=data_module, ckpt_path="best", weights_only=False
         )
 
-    print("\n✅ Training completed!")
+    print("\n✅ Regression training completed!")
 
 
 if __name__ == "__main__":

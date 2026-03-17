@@ -7,6 +7,7 @@ ResNet classifier on LIMUC endoscopy images.
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -42,6 +43,7 @@ class MESClassificationDataset(Dataset):
         data_root: str | Path,
         split: str = "train",
         transform: Optional[Callable] = None,
+        balance_seed: int = 4,
     ) -> None:
         """
         Initialize the dataset.
@@ -50,10 +52,12 @@ class MESClassificationDataset(Dataset):
             data_root: Root directory containing train/val/test folders
             split: One of 'train', 'val', 'test'
             transform: Optional transforms to apply to images
+            balance_seed: Seed used only for train split class balancing shuffle
         """
         self.data_root = Path(data_root)
         self.split = split
         self.transform = transform
+        self.balance_seed = balance_seed
 
         self.split_dir = self.data_root / split
         if not self.split_dir.exists():
@@ -73,15 +77,40 @@ class MESClassificationDataset(Dataset):
                 continue
 
             for img_path in class_dir.iterdir():
-                if img_path.suffix.lower() in self.VALID_EXTENSIONS:
-                    self.samples.append((img_path, class_idx))
-                    self.class_counts[class_idx] += 1
+                if self.split == "train":
+                    if (
+                        img_path.suffix.lower() in self.VALID_EXTENSIONS
+                        and "generated" in img_path.name
+                    ):
+                        self.samples.append((img_path, class_idx))
+                        self.class_counts[class_idx] += 1
+                else:
+                    if img_path.suffix.lower() in self.VALID_EXTENSIONS:
+                        self.samples.append((img_path, class_idx))
+                        self.class_counts[class_idx] += 1
+
+        # downsample classes to balance dataset
+        self.class_counts_2: Dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+        if self.split == "train":
+            min_count = min(self.class_counts.values())
+            balanced_samples = []
+            for class_idx in range(4):
+                class_samples = [s for s in self.samples if s[1] == class_idx]
+                # randomly shuffle class samples before downsampling
+
+                random.seed(self.balance_seed)
+                random.shuffle(class_samples)
+                balanced_samples.extend(class_samples[:min_count])
+                class_count = len(class_samples[:min_count])
+                self.class_counts_2[class_idx] = class_count
+            self.samples = balanced_samples
 
         if len(self.samples) == 0:
             raise RuntimeError(f"No images found in {self.split_dir}")
 
         print(f"[{self.split}] Loaded {len(self.samples)} images")
         print(f"[{self.split}] Class distribution: {self.class_counts}")
+        print(f"[{self.split}] Class distribution balanced: {self.class_counts_2}")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -137,6 +166,7 @@ class MESDataModule(pl.LightningDataModule):
         pin_memory: bool = True,
         augmentation_cfg: Optional[Dict[str, Any]] = None,
         use_weighted_sampler: bool = True,
+        balance_seed: int = 4,
     ) -> None:
         """
         Initialize the DataModule.
@@ -149,6 +179,7 @@ class MESDataModule(pl.LightningDataModule):
             pin_memory: Whether to pin memory for faster GPU transfer
             augmentation_cfg: Augmentation configuration from config file
             use_weighted_sampler: Use weighted random sampler for class balance
+            balance_seed: Seed used only for train split class balancing shuffle
         """
         super().__init__()
         self.save_hyperparameters()
@@ -160,6 +191,7 @@ class MESDataModule(pl.LightningDataModule):
         self.pin_memory = pin_memory
         self.augmentation_cfg = augmentation_cfg or {}
         self.use_weighted_sampler = use_weighted_sampler
+        self.balance_seed = balance_seed
 
         self.train_dataset: MESClassificationDataset
         self.val_dataset: MESClassificationDataset
@@ -271,8 +303,8 @@ class MESDataModule(pl.LightningDataModule):
         transform_list.append(transforms.Resize(resize_size))
 
         # Center crop
-        crop_size = eval_cfg.get("center_crop", self.image_size)
-        transform_list.append(transforms.CenterCrop(crop_size))
+        # crop_size = eval_cfg.get("center_crop", self.image_size)
+        # transform_list.append(transforms.CenterCrop(crop_size))
 
         # To tensor and normalize
         transform_list.append(transforms.ToTensor())
@@ -289,11 +321,13 @@ class MESDataModule(pl.LightningDataModule):
                 data_root=self.data_root,
                 split="train",
                 transform=self._build_train_transforms(),
+                balance_seed=self.balance_seed,
             )
             self.val_dataset = MESClassificationDataset(
                 data_root=self.data_root,
                 split="val",
                 transform=self._build_eval_transforms(),
+                balance_seed=self.balance_seed,
             )
 
         if stage == "test" or stage is None:
@@ -301,6 +335,7 @@ class MESDataModule(pl.LightningDataModule):
                 data_root=self.data_root,
                 split="test",
                 transform=self._build_eval_transforms(),
+                balance_seed=self.balance_seed,
             )
 
     def train_dataloader(self) -> DataLoader:

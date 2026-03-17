@@ -52,7 +52,7 @@ scheduler:
   min_lr: 1e-6
 
 dataset:
-  dataset_path: data/limuc_cleaned
+  dataset_path: dataset/limuc_cleaned
   batch_size: 64
   num_workers: 24
   persistent_workers: true

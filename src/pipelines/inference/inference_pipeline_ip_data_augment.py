@@ -153,7 +153,7 @@ def _prepare_conditioning(
     ``structure_images`` is (B, 3, 224, 224) -- one per sample.
 
     When ``use_routing_gates=True``:
-        3-segment: [target_aoe | image_embeds | delta_embeds]
+        3-segment: [source_aoe | image_embeds | delta_embeds]
     When ``use_routing_gates=False``:
         2-segment: [aoe | image_embeds]
 
@@ -189,13 +189,13 @@ def _prepare_conditioning(
         img_emb = img_emb * image_scale
 
     if use_routing_gates:
-        # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+        # 3-segment: [Source_AOE | E_clean | Delta_AOE]
         delta = module.ordinal_embedder.get_ordinal_delta_embedding(
             source_labels, target_labels
         )
         if delta.dim() == 2:
             delta = delta.unsqueeze(1)
-        return torch.cat([t_aoe, img_emb, delta], dim=1)
+        return torch.cat([s_aoe, img_emb, delta], dim=1)
     else:
         # 2-segment: [AOE | Image]
         return torch.cat([t_aoe, img_emb], dim=1)
@@ -380,7 +380,6 @@ def main() -> None:
 
     module.eval()
 
-    # -- Resolve guidance scale ------------------------------------------------
     use_routing_gates = getattr(module.diff_cfg, "use_routing_gates", True)
     if args.guidance_scale is not None:
         guidance_scale = args.guidance_scale
@@ -391,6 +390,8 @@ def main() -> None:
     print(
         f"   use_routing_gates={use_routing_gates}  " f"guidance_scale={guidance_scale}"
     )
+
+    print(f"Doing cfg is {bool(not use_routing_gates and guidance_scale != 1.0)}")
 
     torch.backends.cudnn.benchmark = True
 
@@ -496,7 +497,6 @@ def main() -> None:
         f.result()
     saver.shutdown(wait=True)
 
-    # ── Summary ──
     print("\n✅ Data augmentation complete!")
     print(f"   Generated per class: {generated_counts}")
 

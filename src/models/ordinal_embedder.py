@@ -31,12 +31,11 @@ def _linear_interpolate(
         (..., D)
     """
 
-    # Ensure alpha is broadcastable
     if alpha.dim() == lower_idx.dim():
         alpha = alpha.unsqueeze(-1)
 
-    emb_lo = F.embedding(lower_idx, table)  # (..., D)
-    emb_hi = F.embedding(upper_idx, table)  # (..., D)
+    emb_lo = F.embedding(lower_idx, table)
+    emb_hi = F.embedding(upper_idx, table)
 
     return emb_lo * (1.0 - alpha) + emb_hi * alpha
 
@@ -171,7 +170,6 @@ class AdditiveOrdinalEmbedder(nn.Module):
             alpha,
         )
 
-        # Add Gaussian noise during training for regularization
         if is_training and noise_std > 0:
             noise = torch.randn_like(out) * noise_std
             out = out + noise

@@ -24,10 +24,9 @@ def compute_orthogonal_loss(
     Returns:
         Scalar: squared cosine similarity of mean-pooled embeddings (→ 0 when orthogonal).
     """
-    # Mean-pool across tokens → (B, D) — handles different token counts
+
     a = anatomy_embeds.mean(dim=1)
     d = disease_embeds.mean(dim=1)
 
-    # Per-sample cosine similarity → (B,)
     cos_sim = F.cosine_similarity(a, d, dim=-1)
     return (cos_sim**2).mean()

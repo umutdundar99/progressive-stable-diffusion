@@ -242,7 +242,7 @@ def _prepare_conditioning(
     Prepare conditioning embeddings for inference.
 
     When ``use_routing_gates=True``:
-        3-segment: [Target_AOE(N) | E_clean(N) | Delta_AOE(N)]
+        3-segment: [Source_AOE(N) | E_clean(N) | Delta_AOE(N)]
 
     When ``use_routing_gates=False``:
         2-segment: [AOE(N) | Image(N)]
@@ -292,13 +292,15 @@ def _prepare_conditioning(
         image_embeds = image_embeds * image_scale
 
     if use_routing_gates:
-        # 3-segment: [Target_AOE | E_clean | Delta_AOE]
+        # 3-segment: [Source_AOE | E_clean | Delta_AOE]
+        # dis_tokens = source severity (matches training where source == target)
+        # delta = proj(E[target]) - proj(E[source]) for severity steering
         delta_embeds = module.ordinal_embedder.get_ordinal_delta_embedding(
             source_labels, target_labels
         )
         if delta_embeds.dim() == 2:
             delta_embeds = delta_embeds.unsqueeze(1)
-        combined = torch.cat([target_aoe, image_embeds, delta_embeds], dim=1)
+        combined = torch.cat([source_aoe, image_embeds, delta_embeds], dim=1)
     else:
         # 2-segment: [AOE | Image]
         combined = torch.cat([target_aoe, image_embeds], dim=1)
@@ -586,6 +588,7 @@ def main() -> None:
         str(args.checkpoint),
         cfg=cfg,
         weights_only=False,
+        strict=False,  # Allow missing keys if checkpoint has extra components
     )
     module = module.to(device)
     module = module.to(torch.float32)
