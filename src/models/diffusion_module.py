@@ -212,19 +212,14 @@ class DiffusionModule(pl.LightningModule):
         return self.unet(latents, timesteps, cond_embed)
 
     def training_step(self, batch: Any, batch_idx: int) -> Tensor:
-        images, labels = batch  # images: (B, 3, H, W), labels: (B,) continuous MES
+        images, labels = batch
 
         # Encode images to latents and apply SD latent scaling
         vae_output = self.vae.encode(images)
-        latents = (
-            vae_output.latent_dist.sample() * self.diff_cfg.latent_scale
-        )  # (B, 4, H/8, W/8)
+        latents = vae_output.latent_dist.sample() * self.diff_cfg.latent_scale
 
-        # Sample noise with optional noise offset for better contrast
-        # Reference: https://www.crosslabs.org/blog/diffusion-with-offset-noise
         noise = torch.randn_like(latents)
         if self.diff_cfg.noise_offset > 0:
-            # Add channel-wise offset noise for better contrast in dark/bright regions
             noise_offset = self.diff_cfg.noise_offset * torch.randn(
                 latents.shape[0],
                 latents.shape[1],
@@ -238,8 +233,6 @@ class DiffusionModule(pl.LightningModule):
         # Sample timesteps
         t = self._sample_timesteps(latents.shape[0])
 
-        # Optional: Input perturbation for better training stability
-        # Reference: https://arxiv.org/abs/2301.11706 (Common Diffusion Noise Schedules)
         if self.diff_cfg.input_perturbation > 0:
             new_noise = noise + self.diff_cfg.input_perturbation * torch.randn_like(
                 noise

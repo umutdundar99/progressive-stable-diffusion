@@ -75,4 +75,3 @@ line-length = 100
 select = ["E", "F", "W", "I", "D", "B"]
 ignore = ["D106"]
 exclude = ["build", "dist", "__pycache__"]
-

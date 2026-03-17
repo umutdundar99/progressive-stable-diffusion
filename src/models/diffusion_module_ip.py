@@ -18,13 +18,13 @@ from typing import Any, Dict, Tuple
 import lightning as pl
 import torch
 import torch.nn.functional as F
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch import Tensor
 
-from .attention_processor import (
-    set_ordinal_ip_attention_processors,
-)
+from .attention_processor_base import set_ordinal_ip_attention_processors
+from .attention_processor_routing_gates import set_split_injection_processors
+from .feature_purifier import FeaturePurifier
 from .image_encoder import ImageEncoder, ImageProjection, ImageProjectionPlus
+from .lr_scheduler import LinearWarmupCosineAnnealingLR
 from .ordinal_embedder import AdditiveOrdinalEmbedder
 from .unet import OrdinalUNet, UNetConfig
 from .vae import SDVAE
@@ -43,13 +43,25 @@ class DiffusionIPConfig:
     min_snr_gamma: float = 1.0
     ema_update_interval: int = 10
     latent_scale: float = 0.18215
-    noise_offset: float = 0.0
     input_perturbation: float = 0.0
     image_encoder_path: str = "openai/clip-vit-base-patch16"
-    num_image_tokens: int = 4
-    image_scale: float = 1.0
+    num_image_tokens: int = 16
+    num_aoe_tokens: int = 16
     use_frequency_strategy: bool = True
     use_image_projection_plus: bool = False
+    use_feature_purifier: bool = True
+    purifier_num_heads: int = 8
+    purifier_ff_mult: int = 2
+    delta_scale: float = 0.0
+    use_routing_gates: bool = True
+    gate_init_anatomy: tuple = (
+        0.5,
+        0.5,
+    )
+    gate_init_disease: tuple = (
+        0.5,
+        0.5,
+    )
 
 
 class DiffusionModuleWithIP(pl.LightningModule):
@@ -63,7 +75,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
     - Image Projection (trainable): Project image features to UNet dimension
     - AOE (trainable): Ordinal embeddings for disease severity
     - UNet (trainable): Noise prediction with dual conditioning
-    - OrdinalIPAttnProcessor (trainable): Custom attention for both conditions
+    - OrdinalUNet + SplitInjectionAttentionProcessor (trainable): Dual-pathway attention
     """
 
     def __init__(self, cfg: Any) -> None:
@@ -81,16 +93,26 @@ class DiffusionModuleWithIP(pl.LightningModule):
             min_snr_gamma=cfg.diffusion.min_snr_gamma,
             ema_update_interval=cfg.diffusion.ema_update_interval,
             latent_scale=getattr(cfg.diffusion, "latent_scale", 0.18215),
-            noise_offset=getattr(cfg.training, "noise_offset", 0.0),
             input_perturbation=getattr(cfg.training, "input_perturbation", 0.0),
             image_encoder_path=getattr(
                 cfg.model, "image_encoder_path", "openai/clip-vit-base-patch16"
             ),
-            num_image_tokens=getattr(cfg.model, "num_image_tokens", 4),
-            image_scale=getattr(cfg.model, "image_scale", 1.0),
-            use_frequency_strategy=getattr(cfg.model, "use_frequency_strategy", True),
+            num_image_tokens=getattr(cfg.model, "num_image_tokens", 16),
             use_image_projection_plus=getattr(
                 cfg.model, "use_image_projection_plus", False
+            ),
+            num_aoe_tokens=getattr(cfg.model, "num_aoe_tokens", 16),
+            use_frequency_strategy=getattr(cfg.model, "use_frequency_strategy", True),
+            use_feature_purifier=getattr(cfg.model, "use_feature_purifier", True),
+            purifier_num_heads=getattr(cfg.model, "purifier_num_heads", 8),
+            purifier_ff_mult=getattr(cfg.model, "purifier_ff_mult", 2),
+            delta_scale=getattr(cfg.model, "delta_scale", 0.0),
+            use_routing_gates=getattr(cfg.model, "use_routing_gates", True),
+            gate_init_anatomy=tuple(
+                getattr(cfg.model, "gate_init_anatomy", [0.5, 0.5])
+            ),
+            gate_init_disease=tuple(
+                getattr(cfg.model, "gate_init_disease", [0.5, 0.5])
             ),
         )
 
@@ -98,11 +120,10 @@ class DiffusionModuleWithIP(pl.LightningModule):
         vae_path = getattr(
             cfg.model, "pretrained_vae_path", cfg.model.pretrained_unet_path
         )
+        _use_fp16 = cfg.training.precision in (16, "16", "16-mixed")
         self.vae = SDVAE(
             pretrained_path=vae_path,
-            torch_dtype=torch.float16
-            if cfg.training.precision == 16
-            else torch.float32,
+            torch_dtype=torch.float16 if _use_fp16 else torch.float32,
             local_files_only=False,
         )
 
@@ -133,6 +154,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
             num_classes=emb_cfg.num_classes,
             embedding_dim=cfg.model.embedding_dim,
             delta_scale=getattr(emb_cfg.aoe, "delta_scale", 0.1),
+            num_tokens=getattr(cfg.model, "num_aoe_tokens", 16),
         )
 
         # UNET (TRAINABLE)
@@ -143,6 +165,15 @@ class DiffusionModuleWithIP(pl.LightningModule):
             out_channels=cfg.model.latent_channels,
         )
         self.unet = OrdinalUNet(unet_config)
+
+        if self.diff_cfg.use_feature_purifier:
+            self.feature_purifier = FeaturePurifier(
+                dim=cfg.model.conditioning_dim,
+                num_heads=self.diff_cfg.purifier_num_heads,
+                ff_mult=self.diff_cfg.purifier_ff_mult,
+            )
+        else:
+            self.feature_purifier = None
 
         self._setup_attention_processors()
 
@@ -157,9 +188,6 @@ class DiffusionModuleWithIP(pl.LightningModule):
             "alphas_cumprod_prev", alphas_cumprod_prev, persistent=False
         )
 
-        self.blur_kernel_size = cfg.model["blur_kernel_size"]
-        self.blur_sigma = cfg.model["blur_sigma"]
-
         # For Min-SNR computation
         snr_values = alphas_cumprod / (1.0 - alphas_cumprod + 1e-8)
         self.register_buffer("snr_values", snr_values, persistent=False)
@@ -173,21 +201,36 @@ class DiffusionModuleWithIP(pl.LightningModule):
         self._print_trainable_params()
 
     def _setup_attention_processors(self) -> None:
-        """Replace UNet attention processors with OrdinalIPAttnProcessors."""
-        # Access the underlying diffusers UNet
+        """Replace UNet cross-attention processors with IP-Adapter attention processors.
+
+        When ``use_routing_gates=True`` installs :class:`SplitInjectionAttentionProcessor`
+        (3-segment conditioning with learnable gates + delta steering).
+        When ``use_routing_gates=False`` installs :class:`OrdinalIPAttnProcessor2_0`
+        (2-segment conditioning with frequency-mode token masking).
+        """
         unet = self.unet.unet
-
-        frequency_dominant_scale = self.cfg.model["frequency_dominant_scale"]
-        frequency_non_dominant_scale = self.cfg.model["frequency_non_dominant_scale"]
-
-        set_ordinal_ip_attention_processors(
-            unet=unet,
-            num_tokens=self.diff_cfg.num_image_tokens,
-            scale=self.diff_cfg.image_scale,
-            use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
-            frequency_dominant_scale=frequency_dominant_scale,
-            frequency_non_dominant_scale=frequency_non_dominant_scale,
-        )
+        if self.diff_cfg.use_routing_gates:
+            gate_inits = {
+                "anatomy": self.diff_cfg.gate_init_anatomy,
+                "disease": self.diff_cfg.gate_init_disease,
+                "both": (0.5, 0.5),
+            }
+            set_split_injection_processors(
+                unet=unet,
+                num_image_tokens=self.diff_cfg.num_image_tokens,
+                num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
+                num_delta_tokens=self.diff_cfg.num_aoe_tokens,
+                use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
+                delta_scale=self.diff_cfg.delta_scale,
+                gate_inits=gate_inits,
+            )
+        else:
+            set_ordinal_ip_attention_processors(
+                unet=unet,
+                num_image_tokens=self.diff_cfg.num_image_tokens,
+                num_aoe_tokens=self.diff_cfg.num_aoe_tokens,
+                use_frequency_strategy=self.diff_cfg.use_frequency_strategy,
+            )
 
     def _print_trainable_params(self) -> None:
         """Print trainable vs frozen parameters."""
@@ -211,10 +254,20 @@ class DiffusionModuleWithIP(pl.LightningModule):
             f"  UNet: {count_params(self.unet):,} trainable / {count_all_params(self.unet):,} total"
         )
 
+        if self.feature_purifier is not None:
+            print(
+                f"  Feature Purifier: {count_params(self.feature_purifier):,} trainable"
+            )
+
         total_trainable = (
             count_params(self.image_projection)
             + count_params(self.ordinal_embedder)
             + count_params(self.unet)
+            + (
+                count_params(self.feature_purifier)
+                if self.feature_purifier is not None
+                else 0
+            )
         )
         print(f"  TOTAL TRAINABLE: {total_trainable:,}")
 
@@ -276,7 +329,6 @@ class DiffusionModuleWithIP(pl.LightningModule):
         else:
             image_embeds = self.image_encoder(structure_images)
 
-        # Project to UNet dimension (trainable)
         return self.image_projection(image_embeds)
 
     def _prepare_conditioning(
@@ -284,26 +336,49 @@ class DiffusionModuleWithIP(pl.LightningModule):
         labels: Tensor,
         structure_images: Tensor,
         is_training: bool = True,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> Tuple[Tensor, ...]:
         """
-        Prepare combined conditioning: AOE + Image embeddings.
+        Prepare conditioning embeddings for the UNet.
+
+        When ``use_routing_gates=True`` (split-injection):
+            Returns 3-segment: (source_aoe, cleaned_image, delta) — each (B, N, D)
+            Layout: [Source_AOE(N) | E_clean(N) | Delta_AOE(N)]
+
+        When ``use_routing_gates=False`` (baseline):
+            Returns 2-segment: (aoe, image) — each (B, N, D)
+            Layout: [AOE(N) | Image(N)]
+
+        Phase 1 (FeaturePurifier) runs in both modes when enabled.
 
         Args:
-            labels: Mayo scores (B,)
+            labels: Mayo scores (B,) — used for both source and target during training
             structure_images: Blurred/depth images (B, 3, H, W)
             is_training: Whether in training mode
 
         Returns:
-            Combined embeddings (B, aoe_tokens + image_tokens, D)
+            Tuple of embedding segments
         """
-
+        # Source AOE: severity of the input image (= target during training)
         aoe_embeds = self.ordinal_embedder(labels, is_training=is_training)
         if aoe_embeds.dim() == 2:
             aoe_embeds = aoe_embeds.unsqueeze(1)
 
+        # Raw image embeddings from CLIP + projection
         image_embeds = self._get_image_embeds(structure_images)
 
-        return aoe_embeds, image_embeds
+        # Phase 1: FeaturePurifier — disease erasure at embedding level
+        # During training, source_aoe == target_aoe (same label)
+        if self.feature_purifier is not None:
+            image_embeds = self.feature_purifier(image_embeds, aoe_embeds)
+
+        if self.diff_cfg.use_routing_gates:
+            # 3-segment: [Source_AOE | E_clean | Delta_AOE]
+            # source == target during training → delta = 0
+            delta_embeds = torch.zeros_like(aoe_embeds)
+            return aoe_embeds, image_embeds, delta_embeds
+        else:
+            # 2-segment: [AOE | Image]
+            return aoe_embeds, image_embeds
 
     def forward(
         self,
@@ -316,7 +391,7 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
     def training_step(self, batch: Any, batch_idx: int) -> Tensor:
         """
-        Training step with dual conditioning.
+        Training step with dual conditioning and orthogonal disentanglement.
 
         Following Meryem's methodology (Section 3.5):
         - AOE conditioning is ALWAYS provided (no CFG dropout for ordinal embeddings)
@@ -337,33 +412,37 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
         # Sample noise
         noise = torch.randn_like(latents)
-        if self.diff_cfg.noise_offset > 0:
-            noise_offset = self.diff_cfg.noise_offset * torch.randn(
-                batch_size,
-                latents.shape[1],
-                1,
-                1,
-                device=latents.device,
-                dtype=latents.dtype,
-            )
-            noise = noise + noise_offset
 
         # Sample timesteps and add noise
         t = self._sample_timesteps(batch_size)
         noisy_latents = self._q_sample(latents, t, noise)
 
-        # Get AOE embeddings
-        aoe_embeds, image_embeds = self._prepare_conditioning(
+        # Get AOE + Image (+ optional Delta) embeddings
+        cond_parts = self._prepare_conditioning(
             labels, structure_images, is_training=True
         )
 
+        if self.diff_cfg.use_routing_gates:
+            # 3-segment: [Source_AOE | E_clean | Delta_AOE]
+            aoe_embeds, image_embeds, delta_embeds = cond_parts
+        else:
+            # 2-segment: [AOE | Image]
+            aoe_embeds, image_embeds = cond_parts
+
+        # CFG dropout — zero out image tokens for some samples
         cfg_drop_prob = getattr(self.cfg.model, "cfg_drop_prob", 0.1)
         drop_mask = torch.rand(batch_size, device=self.device) < cfg_drop_prob
         zero_image_embeds = torch.zeros_like(image_embeds)
 
         drop_mask_expanded = drop_mask.view(-1, 1, 1).expand_as(image_embeds)
         image_embeds = torch.where(drop_mask_expanded, zero_image_embeds, image_embeds)
-        combined_embeds = torch.cat([aoe_embeds, image_embeds], dim=1)
+
+        if self.diff_cfg.use_routing_gates:
+            # 3-segment layout: [Source_AOE(N) | E_clean(N) | Delta_AOE(N)]
+            combined_embeds = torch.cat([aoe_embeds, image_embeds, delta_embeds], dim=1)
+        else:
+            # 2-segment layout: [AOE(N) | Image(N)]
+            combined_embeds = torch.cat([aoe_embeds, image_embeds], dim=1)
 
         noise_pred = self.unet(noisy_latents, t, combined_embeds)
 
@@ -382,16 +461,56 @@ class DiffusionModuleWithIP(pl.LightningModule):
 
         return loss
 
+    def _collect_gate_values(self) -> Dict[str, Dict[str, float]]:
+        """Collect fixed gate values from every SplitInjectionAttentionProcessor."""
+        from .attention_processor_routing_gates import SplitInjectionAttentionProcessor
+
+        gate_values: Dict[str, Dict[str, float]] = {}
+        for name, module in self.unet.unet.named_modules():
+            if hasattr(module, "processor") and isinstance(
+                module.processor, SplitInjectionAttentionProcessor
+            ):
+                proc = module.processor
+                gate_values[name] = {
+                    "anat_gate": proc.anat_gate.item(),
+                    "dis_gate": proc.dis_gate.item(),
+                }
+        return gate_values
+
+    def on_train_epoch_end(self) -> None:
+        """Log per-block gate values to wandb at the end of each epoch."""
+        if not self.diff_cfg.use_routing_gates:
+            return
+
+        gate_values = self._collect_gate_values()
+        if not gate_values:
+            return
+
+        anat_all, dis_all = [], []
+        for block_name, vals in gate_values.items():
+            short = block_name.replace(".attentions.", ".attn.")
+            self.log(f"gates/{short}/anat", vals["anat_gate"], on_epoch=True)
+            self.log(f"gates/{short}/dis", vals["dis_gate"], on_epoch=True)
+            anat_all.append(vals["anat_gate"])
+            dis_all.append(vals["dis_gate"])
+
+        self.log("gates/mean_anat", sum(anat_all) / len(anat_all), on_epoch=True)
+        self.log("gates/mean_dis", sum(dis_all) / len(dis_all), on_epoch=True)
+
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configure optimizer with separate learning rates."""
         opt_cfg = self.cfg.optimizer
 
-        # Group parameters with different learning rates
         params = [
             {"params": self.unet.parameters(), "lr": opt_cfg.lr},
             {"params": self.ordinal_embedder.parameters(), "lr": opt_cfg.lr},
             {"params": self.image_projection.parameters(), "lr": opt_cfg.lr * 2},
         ]
+
+        if self.feature_purifier is not None:
+            params.append(
+                {"params": self.feature_purifier.parameters(), "lr": opt_cfg.lr * 2}
+            )
 
         optimizer = torch.optim.AdamW(
             params,

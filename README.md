@@ -1,20 +1,36 @@
-# Patient-Conditioned Ordinal Diffusion for Progressive Medical Image Synthesis
+# Synthesizing Longitudinal Ulcerative Colitis Progression via Disentangled Latent Diffusion (DADD)
 
-This repository implements a patient-conditioned ordinal diffusion framework for synthesizing disease progression sequences in medical imaging. The approach integrates IP-Adapter-based image conditioning with Additive Ordinal Embeddings (AOE) within a Stable Diffusion architecture, enabling the generation of anatomically consistent disease progression while maintaining ordinal severity relationships.
+This repository implements the **Disentangled Anatomy-Disease Diffusion (DADD)** framework for synthesizing longitudinal medical images at controllable disease stages while preserving patient-specific anatomy. This approach is targeted toward ulcerative colitis endoscopy, where severity follows a continuous ordinal progression along the Mayo Endoscopic Score (MES).
 
 ## Architecture Overview
 
-![Architecture Diagram](assets/architecture.png)
+![Architecture Diagram](paper/figures/pipeline.png)
 
-The framework extends Stable Diffusion v1.4 with two conditioning pathways:
-- **Ordinal Conditioning (AOE):** Encodes disease severity as cumulative embeddings, where higher severity levels incorporate features from all lower levels
-- **Patient Conditioning (IP-Adapter):** Extracts patient-specific anatomical features from reference images via CLIP encoder and injects them through decoupled cross-attention
+The framework resolves the inherent entanglement of patient anatomy and pathological textures by forcing anatomy and disease embeddings to interact.
 
-## Disease Progression Examples
+### Key Innovations
 
-![Progression Examples](assets/progression.png)
+1. **Feature Purifier (Cross-Attention based Disease Erasure):** A cross-attention mechanism that identifies pathological channels by querying image tokens with the Additive Ordinal Embedder (AOE), gating them out to yield a purified anatomical representation.
+2. **Frequency-Aware Triple-Pathway Cross-Attention:** A split-injection attention mechanism with fixed frequency-aware routing gates across U-Net layers. It confines disease edits to fine-texture scales while preserving structural identity.
+3. **Delta Steering:** A training-free, single-pass alternative to Classifier-Free Guidance (CFG). This signal is derived from the projected AOE difference and provides signed, magnitude-proportional control over severity shifts.
 
-Given a reference colonoscopy image, the model generates smooth transitions across Mayo Endoscopic Score (MES) levels 0-3 while preserving patient-specific anatomical features.
+### Formulation Highlights
+
+Let $\mathbf{e}_{\text{img}}$ be the image tokens containing both anatomy and source disease $D_s$. By querying these against the source disease embedding $\mathbf{e}_{\text{aoe}}^{\text{s}}$, we identify the disease component:
+$$ \mathbf{d} = \text{CrossAttn}\bigl(Q=\text{LN}(\mathbf{e}_{\text{img}}), K=V=\text{LN}(\mathbf{e}_{\text{aoe}}^{\text{s}})\bigr) $$
+
+A per-dimension gating mask $\mathbf{g}$ suppresses this from the image tokens to yield purified anatomy tokens $\mathbf{e}_{\text{clean}}$:
+$$ \mathbf{e}_{\text{clean}} = \text{LN}\bigl(\mathbf{e}_{\text{img}} - \mathbf{g} \odot \mathbf{d}\bigr) $$
+
+The final conditioning context fed to the U-Net concatenated to control generation is:
+$$ \mathbf{C} = \big[\,\mathbf{e}_{\text{aoe}}^{\text{t}}\;\|\;\mathbf{e}_{\text{clean}}\;\|\;\mathbf{\Delta}\,\big] $$
+where $\mathbf{\Delta}$ parameterizes the Delta Steering intensity.
+
+## Disease Progression Comparison: DADD vs IP-AOE
+
+![Model Comparison](paper/figures/model_comparison_ours.png)
+
+*Comparison demonstrating the difference between the baseline IP-AOE (with guidance weight $w=3$) and our proposed DADD approach (with target delta scalar $\lambda=3$). DADD maintains robust consistency in the structural layout (e.g. mucosal folds) while successfully rendering severity shifts.*
 
 ## Project Structure
 
@@ -23,6 +39,7 @@ progressive-stable-diffusion/
 ├── configs/
 │   ├── train.yaml              # Base diffusion training config
 │   └── train_classifier.yaml   # MES classifier training config
+├── paper/                      # Figures and generated outcomes
 ├── src/
 │   ├── models/
 │   │   ├── diffusion_module.py      # Base diffusion module
@@ -67,7 +84,7 @@ pip install -e ".[dev]"
 ### Training the Diffusion Model
 
 ```bash
-# Train with IP-Adapter integration
+# Train with DADD integration
 python -m src.main --config configs/train.yaml
 
 # Override specific parameters
@@ -91,10 +108,8 @@ python -m src.pipelines.inference_pipeline_ip \
 
 **Key arguments:**
 - `--structure-image`: Reference patient image for anatomical conditioning
-- `--guidance-scale`: CFG strength (optimal: 3.0)
+- `--guidance-scale`: Strength scaler for transitions e.g., $\lambda=3.0$
 - `--mes-steps`: Number of MES levels to generate (13 for smooth interpolation)
-- `--zero-image`: Disable image conditioning (AOE-only mode)
-- `--no-blur`: Use raw images instead of blurred for conditioning
 
 ### Evaluation
 
@@ -115,50 +130,12 @@ Train a ResNet classifier for downstream evaluation:
 python -m src.classification.train --config configs/train_classifier.yaml
 ```
 
-## Model Configurations
-
-Three model variants are provided for ablation study:
-
-| Model | Blur | γ_dom | γ_non | Description |
-|-------|------|-------|-------|-------------|
-| Model A | Yes | 1.0 | 1.0 | Uniform weighting + blur |
-| Model B | Yes | 1.5 | 0.5 | Frequency-aware + blur |
-| Model C | No | 1.0 | 1.0 | Uniform weighting, no blur |
-
-**Frequency-aware weighting** (`γ_dom=1.5`, `γ_non=0.5`) emphasizes image conditioning in high-resolution U-Net layers (anatomical details) while reducing it in low-resolution layers (disease patterns).
-
-## Key Features
-
-- **Ordinal Embeddings:** AOE ensures severity level monotonicity through cumulative embedding design
-- **Resolution-Aware Conditioning:** Separate control over anatomical features (high-res) and disease patterns (low-res)
-- **Joint Fine-tuning:** Both UNet and IP-Adapter modules are trained on medical imaging data
-- **EMA Weights:** Exponential moving average for stable generation
-- **Classifier-Free Guidance:** Dual guidance for ordinal and image conditioning
-
-## Evaluation Metrics
-
-- **FID:** Fréchet Inception Distance (distributional similarity)
-- **IS:** Inception Score (quality and diversity)
-- **LPIPS:** Learned Perceptual Image Patch Similarity (diversity)
-- **SSIM:** Structural Similarity Index
-- **QWK:** Quadratic Weighted Kappa (ordinal consistency, for classifier)
-
-## Dataset
-
-Experiments use the LIMUC (Labeled Images for Ulcerative Colitis) dataset with Mayo Endoscopic Score annotations:
-
-| Split | MES 0 | MES 1 | MES 2 | MES 3 |
-|-------|-------|-------|-------|-------|
-| Train | 4,149 | 2,010 | 823 | 579 |
-| Val | 980 | 518 | 205 | 107 |
-| Test | 976 | 524 | 226 | 179 |
-
 ## Citation
 
 ```bibtex
 @article{dundar2026patient,
-  title={Patient-Conditioned Ordinal Diffusion Models with IP-Adapter for Progressive Medical Image Synthesis},
-  author={D{\"u}ndar, Umut},
+  title={Synthesizing Longitudinal Ulcerative Colitis Progression via Disentangled Latent Diffusion},
+  author={D{\"u}ndar, Umut and Temizel, Alptekin},
   journal={arXiv preprint},
   year={2026}
 }

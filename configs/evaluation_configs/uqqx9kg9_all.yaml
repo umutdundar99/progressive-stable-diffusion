@@ -11,7 +11,7 @@ model:
   base_channels: 320
   num_res_blocks: [2, 2, 2, 2]
   attention_heads: 8
-  cfg_drop_prob: 0.00
+  cfg_drop_prob: 0.0
   latent_channels: 4
   use_pretrained_vae: true
   pretrained_vae_path: "CompVis/stable-diffusion-v1-4"
@@ -55,7 +55,7 @@ scheduler:
   min_lr: 1e-6
 
 dataset:
-  dataset_path: dataset
+  dataset_path: dataset/limuc_cleaned
   batch_size: 64
   num_workers: 24
   persistent_workers: true
@@ -87,15 +87,16 @@ training:
   use_compile: false
   compile_mode: "reduce-overhead"
   gradient_checkpointing: true
+  noise_offset: 0.0
   resume_checkpoint: null
 
 wandb:
-  project: "your_project_name"
-  group: "your_experiment_group"
-  run_name: "your_run_name"
+  project: "prog-disease-generation-ip"
+  group: "cvpr_final"
+  run_name: "no purifier no routing gates"
   run_id: null
   log_samples_every_n_steps: 50
-  offline: True
+  offline: False
 
 diffusion:
   noise_schedule: "linear"
