@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DADD – Disentangled Anatomy-Disease Diffusion</title>
+
+  <!-- Bulma CSS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css" />
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <!-- Academicons (for arXiv icon) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css" />
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;600;700&family=Noto+Sans:wght@400;600&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="static/css/style.css" />
+</head>
+
+<body>
+
+<!-- ═══════════════════════════════════════════════════════
+     NAVBAR
+═══════════════════════════════════════════════════════ -->
+<nav class="navbar" role="navigation" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a class="navbar-item" href="#">
+      <strong>DADD</strong>
+    </a>
+  </div>
+  <div class="navbar-menu">
+    <div class="navbar-end">
+      <a class="navbar-item" href="#abstract">Abstract</a>
+      <a class="navbar-item" href="#demo">Demo</a>
+      <a class="navbar-item" href="#method">Method</a>
+      <a class="navbar-item" href="#citation">Citation</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════
+     HERO / HEADER
+═══════════════════════════════════════════════════════ -->
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop has-text-centered">
+
+      <!-- Venue badge -->
+      <p class="venue-badge">CVPR 2025 Workshop · SynData: Synthetic Data for Computer Vision</p>
+
+      <!-- Title -->
+      <h1 class="title is-2 publication-title">
+        Disentangled Anatomy-Disease Conditioning with Feature Purification<br>
+        for Synthetic Endoscopic Disease Progression
+      </h1>
+
+      <!-- Authors -->
+      <div class="author-block-container">
+        <span class="author-block">
+          <a href="https://github.com/umutdundar99" target="_blank">Umut Dündar</a><sup>1</sup>
+        </span>
+        <span class="author-separator">,&nbsp;</span>
+        <span class="author-block">
+          <a href="https://user.ceng.metu.edu.tr/~temizel/" target="_blank">Alptekin Temizel</a><sup>1</sup>
+        </span>
+      </div>
+
+      <!-- Affiliation -->
+      <div class="affiliation-block">
+        <sup>1</sup>&thinsp;Middle East Technical University, Ankara, Turkey
+      </div>
+
+      <!-- Link buttons -->
+      <div class="buttons is-centered link-buttons-row">
+        <a class="button is-dark is-rounded" href="#" target="_blank">
+          <span class="icon"><i class="ai ai-arxiv ai-lg"></i></span>
+          <span>Paper (arXiv)</span>
+        </a>
+        <a class="button is-dark is-rounded" href="https://github.com/umutdundar99/progressive-stable-diffusion" target="_blank">
+          <span class="icon"><i class="fab fa-github"></i></span>
+          <span>Code (GitHub)</span>
+        </a>
+        <a class="button is-dark is-rounded" href="https://github.com/GorkemP/labeled-images-for-ulcerative-colitis" target="_blank">
+          <span class="icon"><i class="fas fa-database"></i></span>
+          <span>Dataset (LIMUC)</span>
+        </a>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     TEASER
+═══════════════════════════════════════════════════════ -->
+<section class="section teaser-section">
+  <div class="container is-max-desktop has-text-centered">
+    <figure class="image">
+      <img src="static/images/teaser.png" alt="DADD disease progression teaser"
+           onerror="this.style.display='none'" />
+    </figure>
+    <p class="teaser-caption">
+      DADD synthesises realistic endoscopic images at <em>any</em> Mayo Endoscopic Score (MES)
+      while preserving the patient's anatomical identity.
+      Each row conditions on a single source frame; severity is swept from remission (MES 0) to severe (MES 3).
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     ABSTRACT
+═══════════════════════════════════════════════════════ -->
+<section class="section" id="abstract">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 section-heading">Abstract</h2>
+    <div class="content abstract-text">
+      <p>
+        Synthesising longitudinal medical images at controllable disease stages while preserving
+        patient-specific anatomy is hindered by the entanglement of pathological textures and
+        structural features. We address this challenge for ulcerative colitis (UC) endoscopy,
+        where severity follows a continuous ordinal progression along the
+        <strong>Mayo Endoscopic Score (MES)</strong>.
+      </p>
+      <p>
+        Our framework, <strong>Disentangled Anatomy-Disease Diffusion (DADD)</strong>, conditions
+        a latent diffusion model on two complementary embeddings: a pretrained image encoder for
+        patient anatomy and a separately trained ordinal embedder for cumulative disease severity.
+        Since image embeddings inevitably absorb disease information, we introduce a
+        <strong>Feature Purifier</strong> — a cross-attention-based erasure mechanism that
+        identifies and suppresses disease-correlated channels to yield purified anatomical
+        representations.
+      </p>
+      <p>
+        These cleaned anatomy tokens and target disease tokens are injected into the denoising
+        network via a <strong>Triple-Pathway Cross-Attention</strong> mechanism with
+        resolution-dependent routing gates. Furthermore, we introduce
+        <strong>Delta Steering</strong>, a training-free directional signal derived from the
+        ordinal embeddings that enables explicit, single-pass control over disease transitions
+        at inference. Validated on the LIMUC dataset, DADD produces high-fidelity images across
+        all severity levels and effectively rebalances skewed class distributions, enhancing
+        performance for downstream classification.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     INTERACTIVE DEMO
+═══════════════════════════════════════════════════════ -->
+<section class="section demo-section" id="demo">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 section-heading">Interactive Disease Progression</h2>
+    <p class="demo-subtitle">
+      Select a source endoscopy image. Drag the slider to steer the generated image
+      from healthy mucosa (MES 0) to severe disease (MES 3) — or anywhere in between.
+      All images are pre-generated by DADD-H; no model runs in your browser.
+    </p>
+
+    <!-- Patient selector: tabs by MES level -->
+    <div class="tabs is-centered is-boxed mes-tabs" id="mesTabs">
+      <ul>
+        <li class="is-active" data-mes="0"><a><span class="mes-label-tab">MES 0</span><span class="mes-name-tab">Remission</span></a></li>
+        <li data-mes="1"><a><span class="mes-label-tab">MES 1</span><span class="mes-name-tab">Mild</span></a></li>
+        <li data-mes="2"><a><span class="mes-label-tab">MES 2</span><span class="mes-name-tab">Moderate</span></a></li>
+        <li data-mes="3"><a><span class="mes-label-tab">MES 3</span><span class="mes-name-tab">Severe</span></a></li>
+      </ul>
+    </div>
+
+    <!-- Thumbnail strip -->
+    <div class="thumbnail-strip" id="thumbnailStrip"></div>
+
+    <!-- Main demo area -->
+    <div class="demo-area columns is-vcentered">
+
+      <!-- Left: source image -->
+      <div class="column is-narrow has-text-centered">
+        <p class="demo-label">Source Image</p>
+        <div class="source-frame">
+          <img id="sourceImg" src="" alt="Source patient image" width="192" height="192" />
+          <div class="mes-badge" id="sourceBadge">MES ?</div>
+        </div>
+        <p class="source-note">Original endoscopy<br>(used for anatomy)</p>
+      </div>
+
+      <!-- Arrow -->
+      <div class="column is-narrow has-text-centered arrow-col">
+        <span class="arrow-icon">&#8594;</span>
+        <div class="model-label">DADD-H</div>
+      </div>
+
+      <!-- Right: generated image + controls -->
+      <div class="column has-text-centered">
+        <p class="demo-label">Generated at target MES</p>
+
+        <!-- Generated image -->
+        <div class="generated-frame">
+          <img id="generatedImg" src="" alt="Generated image" width="256" height="256" />
+          <div class="loading-overlay" id="loadingOverlay">
+            <div class="loader"></div>
+          </div>
+        </div>
+
+        <!-- MES Bar -->
+        <div class="mes-bar-container">
+          <div class="mes-bar-track">
+            <div class="mes-bar-fill" id="mesBarFill"></div>
+            <div class="mes-bar-thumb" id="mesBarThumb"></div>
+          </div>
+          <div class="mes-bar-labels">
+            <span>0</span><span>1</span><span>2</span><span>3</span>
+          </div>
+          <div class="mes-bar-ticks">
+            <span class="tick-mark"></span>
+            <span class="tick-mark"></span>
+            <span class="tick-mark"></span>
+            <span class="tick-mark"></span>
+          </div>
+        </div>
+
+        <!-- MES value display -->
+        <div class="mes-value-display">
+          Target MES: <span id="mesValueLabel" class="mes-value-number">0.00</span>
+        </div>
+
+        <!-- Slider -->
+        <input
+          type="range"
+          id="mesSlider"
+          class="mes-slider"
+          min="0" max="30" step="1" value="0"
+        />
+        <div class="slider-endpoints">
+          <span>MES 0.0<br><small>Remission</small></span>
+          <span>MES 3.0<br><small>Severe</small></span>
+        </div>
+
+        <!-- Controls row -->
+        <div class="controls-row">
+          <button class="button is-small is-light" id="btnPlayPause">
+            <span class="icon"><i class="fas fa-play" id="playIcon"></i></span>
+            <span id="playLabel">Animate</span>
+          </button>
+          <button class="button is-small is-light" id="btnReverse">
+            <span class="icon"><i class="fas fa-redo-alt"></i></span>
+            <span>Reverse</span>
+          </button>
+          <label class="checkbox speed-label">
+            <input type="checkbox" id="pingpong" checked />
+            Ping-pong
+          </label>
+        </div>
+
+      </div>
+    </div><!-- /demo-area -->
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     METHODOLOGY
+═══════════════════════════════════════════════════════ -->
+<section class="section" id="method">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 section-heading">Method</h2>
+
+    <!-- Pipeline figure -->
+    <figure class="image method-figure">
+      <img src="static/images/pipeline.png" alt="DADD architecture pipeline"
+           onerror="this.style.display='none'" />
+    </figure>
+    <p class="figure-caption">
+      <strong>Figure:</strong> DADD training pipeline. A pretrained CLIP image encoder captures
+      patient anatomy while the Additive Ordinal Embedder (AOE) encodes target disease severity.
+      The Feature Purifier removes disease information from the image tokens before injection into
+      the Triple-Pathway Cross-Attention blocks of the denoising U-Net.
+    </p>
+
+    <!-- Three innovations -->
+    <div class="columns is-multiline innovations-grid">
+
+      <div class="column is-one-third">
+        <div class="innovation-card">
+          <div class="innovation-icon">&#x1F9F9;</div>
+          <h3 class="innovation-title">Feature Purifier</h3>
+          <p class="innovation-text">
+            A cross-attention module queries image tokens against the <em>source</em> disease
+            embedding to identify and gate out disease-correlated channels, yielding clean
+            anatomical representations free of source-severity bias.
+          </p>
+        </div>
+      </div>
+
+      <div class="column is-one-third">
+        <div class="innovation-card">
+          <div class="innovation-icon">&#x1F4CD;</div>
+          <h3 class="innovation-title">Triple-Pathway Cross-Attention</h3>
+          <p class="innovation-text">
+            Anatomy tokens and disease tokens are injected into the U-Net through separate
+            attention pathways with fixed, resolution-dependent routing gates — confining
+            disease edits to fine-texture scales while preserving coarse structure.
+          </p>
+        </div>
+      </div>
+
+      <div class="column is-one-third">
+        <div class="innovation-card">
+          <div class="innovation-icon">&#x1F3AF;</div>
+          <h3 class="innovation-title">Delta Steering</h3>
+          <p class="innovation-text">
+            A training-free directional signal
+            &Delta;&nbsp;=&nbsp;AOE(y<sub>t</sub>) &minus; AOE(y<sub>s</sub>)
+            provides signed, magnitude-proportional control over the severity
+            transition — no additional forward passes required.
+          </p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     CITATION
+═══════════════════════════════════════════════════════ -->
+<section class="section citation-section" id="citation">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 section-heading">Citation</h2>
+    <div class="citation-box">
+      <pre id="bibtexBlock">@inproceedings{dundar2025dadd,
+  title     = {Disentangled Anatomy-Disease Conditioning with Feature Purification
+               for Synthetic Endoscopic Disease Progression},
+  author    = {D{\"u}ndar, Umut and Temizel, Alptekin},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision
+               and Pattern Recognition Workshops (CVPRW)},
+  year      = {2025}
+}</pre>
+      <button class="button is-small is-light copy-btn" onclick="copyBibtex()">
+        <span class="icon"><i class="fas fa-copy"></i></span>
+        <span id="copyLabel">Copy BibTeX</span>
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     FOOTER
+═══════════════════════════════════════════════════════ -->
+<footer class="footer">
+  <div class="content has-text-centered">
+    <p>
+      Website template adapted from
+      <a href="https://github.com/eliahuhorwitz/Academic-project-page-template" target="_blank">Academic Project Page Template</a>.
+      &copy; 2025 Umut Dündar, Alptekin Temizel.
+    </p>
+  </div>
+</footer>
+
+<script src="static/js/index.js"></script>
+</body>
+</html>

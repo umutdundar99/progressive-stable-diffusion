@@ -1,0 +1,120 @@
+/home/umut_dundar/miniconda3/envs/stable/lib/python3.10/site-packages/lightning/pytorch/utilities/migration/utils.py:56: The loaded checkpoint was produced with Lightning v2.6.1, which is newer than your current Lightning version: v2.5.6
+`torch_dtype` is deprecated! Use `dtype` instead!
+/home/umut_dundar/miniconda3/envs/stable/lib/python3.10/site-packages/lightning/pytorch/core/saving.py:191: Found keys that are in the model state dict but not in the checkpoint: ['unet.unet.down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.dis_gate', 'unet.unet.mid_block.attentions.0.transformer_blocks.0.attn2.processor.anat_gate', 'unet.unet.mid_block.attentions.0.transformer_blocks.0.attn2.processor.dis_gate']
+/home/umut_dundar/miniconda3/envs/stable/lib/python3.10/site-packages/lightning/pytorch/core/saving.py:195: Found keys that are not in the model state dict but in the checkpoint: ['unet.unet.down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.gate_modulator.bias', 'unet.unet.mid_block.attentions.0.transformer_blocks.0.attn2.processor.anat_gate_logit', 'unet.unet.mid_block.attentions.0.transformer_blocks.0.attn2.processor.dis_gate_logit', 'unet.unet.mid_block.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.weight', 'unet.unet.mid_block.attentions.0.transformer_blocks.0.attn2.processor.gate_modulator.bias']
+Device: cuda
+Loading DADD-H (uqqx9kg9_all)…
+Setting down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor as disease-role with anat_gate=0.9, dis_gate=0.1, delta_scale=0.0
+Setting down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor as disease-role with anat_gate=0.9, dis_gate=0.1, delta_scale=0.0
+Setting up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor as disease-role with anat_gate=0.9, dis_gate=0.1, delta_scale=0.0
+Setting up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor as disease-role with anat_gate=0.9, dis_gate=0.1, delta_scale=0.0
+Setting up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor as disease-role with anat_gate=0.9, dis_gate=0.1, delta_scale=0.0
+Setting up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor as anatomy-role with anat_gate=0.1, dis_gate=0.9, delta_scale=0.0
+Setting mid_block.attentions.0.transformer_blocks.0.attn2.processor as disease-role with anat_gate=0.9, dis_gate=0.1, delta_scale=0.0
+✅ DiffusionModuleWithIP initialized successfully!
+
+📊 Parameter Summary:
+  VAE: 0 trainable / 83,653,863 total (frozen)
+  Image Encoder: 0 trainable / 303,966,208 total (frozen)
+  Image Projection: 14,976,768 trainable
+  Ordinal Embedder: 20,096,256 trainable
+  UNet: 878,690,244 trainable / 878,690,244 total
+  Feature Purifier: 5,908,224 trainable
+  TOTAL TRAINABLE: 919,671,492
+Model loaded.
+Total jobs: 28
+
+[1/28] UC_patient_154_10  (MES 0)
+  Done in 23.8s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_154_10
+
+[2/28] UC_patient_25_34  (MES 0)
+  Done in 23.7s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_25_34
+
+[3/28] UC_patient_323_56  (MES 0)
+  Done in 24.0s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_323_56
+
+[4/28] UC_patient_493_18  (MES 0)
+  Done in 24.4s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_493_18
+
+[5/28] UC_patient_502_11  (MES 0)
+  Done in 24.6s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_502_11
+
+[6/28] UC_patient_8_12  (MES 0)
+  Done in 24.7s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_8_12
+
+[7/28] UC_patient_9_6  (MES 0)
+  Done in 24.6s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_0/UC_patient_9_6
+
+[8/28] UC_patient_10_3  (MES 1)
+  Done in 24.9s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_10_3
+
+[9/28] UC_patient_165_7  (MES 1)
+  Done in 24.9s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_165_7
+
+[10/28] UC_patient_19_19  (MES 1)
+  Done in 25.1s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_19_19
+
+[11/28] UC_patient_22_39  (MES 1)
+  Done in 25.0s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_22_39
+
+[12/28] UC_patient_37_57  (MES 1)
+  Done in 25.0s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_37_57
+
+[13/28] UC_patient_380_50  (MES 1)
+  Done in 25.3s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_380_50
+
+[14/28] UC_patient_514_41  (MES 1)
+  Done in 25.1s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_1/UC_patient_514_41
+
+[15/28] UC_patient_24_23  (MES 2)
+  Done in 25.1s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_24_23
+
+[16/28] UC_patient_261_17  (MES 2)
+  Done in 25.1s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_261_17
+
+[17/28] UC_patient_449_10  (MES 2)
+  Done in 25.2s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_449_10
+
+[18/28] UC_patient_463_46  (MES 2)
+  Done in 25.2s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_463_46
+
+[19/28] UC_patient_60_17  (MES 2)
+  Done in 24.8s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_60_17
+
+[20/28] UC_patient_8_4  (MES 2)
+  Done in 25.1s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_8_4
+
+[21/28] UC_patient_93_43  (MES 2)
+  Done in 25.4s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_2/UC_patient_93_43
+
+[22/28] UC_patient_196_21  (MES 3)
+  Done in 25.3s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_196_21
+
+[23/28] UC_patient_199_47  (MES 3)
+  Done in 25.3s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_199_47
+
+[24/28] UC_patient_226_42  (MES 3)
+  Done in 25.4s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_226_42
+
+[25/28] UC_patient_24_27  (MES 3)
+  Done in 25.3s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_24_27
+
+[26/28] UC_patient_268_17  (MES 3)
+  Done in 25.1s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_268_17
+
+[27/28] UC_patient_60_3  (MES 3)
+  Done in 25.2s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_60_3
+
+[28/28] UC_patient_97_3  (MES 3)
+  Done in 25.3s → /home/umut_dundar/repositories/progressive-stable-diffusion/website/static/images/inference/source_3/UC_patient_97_3
+
+✅ All inference jobs complete.
