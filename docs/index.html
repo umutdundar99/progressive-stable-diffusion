@@ -80,7 +80,7 @@
           <span class="icon"><i class="fab fa-github"></i></span>
           <span>Code (GitHub)</span>
         </a>
-        <a class="button is-dark is-rounded" href="https://github.com/GorkemP/labeled-images-for-ulcerative-colitis" target="_blank">
+        <a class="button is-dark is-rounded" href="https://zenodo.org/records/5827695" target="_blank">
           <span class="icon"><i class="fas fa-database"></i></span>
           <span>Dataset (LIMUC)</span>
         </a>
@@ -272,6 +272,18 @@
       patient anatomy while the Additive Ordinal Embedder (AOE) encodes target disease severity.
       The Feature Purifier removes disease information from the image tokens before injection into
       the Triple-Pathway Cross-Attention blocks of the denoising U-Net.
+    </p>
+
+    <!-- Attention detail figure -->
+    <figure class="image method-figure" style="margin-top: 2rem;">
+      <img src="static/images/attention_detail.png" alt="Feature Purifier and Triple-Pathway Cross-Attention detail"
+           onerror="this.style.display='none'" />
+    </figure>
+    <p class="figure-caption">
+      <strong>Figure:</strong> Detailed view of the Feature Purifier and Triple-Pathway Cross-Attention modules.
+      The purifier identifies and suppresses disease-correlated channels in the image tokens via cross-attention
+      against the source disease embedding. The routing gates then direct the cleaned anatomy tokens and target
+      disease tokens into separate attention pathways at each U-Net resolution.
     </p>
 
     <!-- Three innovations -->
